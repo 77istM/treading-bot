@@ -1,3 +1,4 @@
 .env
 trading_bot.db
 __pycache__/
+*.log

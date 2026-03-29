@@ -1,3 +1,5 @@
+import logging
+import logging.handlers
 import os
 import sqlite3
 from datetime import date, datetime, timedelta
@@ -19,6 +21,20 @@ try:
     _has_data_client = True
 except ImportError:
     _has_data_client = False
+
+# --- Logging Setup ---
+_log_format = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+_handlers: list[logging.Handler] = [logging.StreamHandler()]
+try:
+    _file_handler = logging.handlers.RotatingFileHandler(
+        "bot.log", maxBytes=5_000_000, backupCount=3
+    )
+    _file_handler.setFormatter(_log_format)
+    _handlers.append(_file_handler)
+except OSError:
+    pass  # File logging unavailable (permissions/disk); continue with console only
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=_handlers)
+logger = logging.getLogger(__name__)
 
 # --- Configuration & Setup ---
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -55,6 +71,34 @@ data_client = (
     else None
 )
 llm = Ollama(model="llama3.2:3b", base_url="http://localhost:11434")
+
+
+def _validate_credentials() -> None:
+    """Raise EnvironmentError if required API credentials are missing."""
+    missing = [name for name, val in [
+        ("ALPACA_API_KEY", ALPACA_API_KEY),
+        ("ALPACA_SECRET", ALPACA_SECRET),
+    ] if not val]
+    if missing:
+        raise EnvironmentError(
+            f"Missing required environment variables: {', '.join(missing)}. "
+            "Set them in your .env file before starting the bot."
+        )
+    if not NEWS_API_KEY:
+        logger.warning("NEWS_API_KEY is not set – news/sentiment signals will be unavailable.")
+
+
+def _check_ollama_health() -> None:
+    """Verify Ollama is reachable before the main loop starts."""
+    try:
+        resp = requests.get("http://localhost:11434/api/tags", timeout=5)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            "Ollama is not reachable at http://localhost:11434. "
+            "Start it with: ollama serve\n"
+            f"  Detail: {exc}"
+        ) from exc
 
 
 # --- Database Initialisation ---
@@ -116,8 +160,8 @@ def read_setting(conn, key, default):
         row = cursor.fetchone()
         if row:
             return float(row[0])
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Could not read setting '%s' from DB: %s. Using default %s.", key, exc, default)
     return default
 
 
@@ -203,7 +247,8 @@ def get_portfolio_value() -> float:
     try:
         account = trading_client.get_account()
         return float(account.portfolio_value)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Could not fetch portfolio value from Alpaca: %s. Defaulting to $100,000.", exc)
         return 100_000.0
 
 
@@ -214,22 +259,22 @@ def get_current_price(ticker) -> float | None:
             req = StockLatestTradeRequest(symbol_or_symbols=ticker)
             trade = data_client.get_stock_latest_trade(req)
             return float(trade[ticker].price)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Live trade price fetch failed for %s: %s.", ticker, exc)
     try:
         positions = trading_client.get_all_positions()
         for pos in positions:
             if pos.symbol == ticker:
                 return float(pos.current_price)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Could not get current price for %s from positions: %s.", ticker, exc)
     return None
 
 
 def calculate_position_size(price: float, portfolio_value: float) -> int:
     """Ring fence: allocate at most MAX_POSITION_PCT of portfolio per trade."""
     if price is None or price <= 0:
-        print(f"  [WARN] Invalid price ({price}) for position sizing – defaulting to 1 share.")
+        logger.warning("Invalid price (%s) for position sizing – defaulting to 1 share.", price)
         return 1
     max_dollars = portfolio_value * MAX_POSITION_PCT
     return max(1, int(max_dollars / price))
@@ -238,6 +283,9 @@ def calculate_position_size(price: float, portfolio_value: float) -> int:
 # --- News Helper ---
 def _fetch_headlines(query: str, page_size: int = 5) -> list[str]:
     """Fetch news headlines from NewsAPI for the given query."""
+    if not NEWS_API_KEY:
+        logger.debug("NEWS_API_KEY is not set – skipping headline fetch for: %s.", query)
+        return []
     url = (
         f"https://newsapi.org/v2/everything"
         f"?q={requests.utils.quote(query)}"
@@ -249,7 +297,8 @@ def _fetch_headlines(query: str, page_size: int = 5) -> list[str]:
     try:
         resp = requests.get(url, timeout=10).json()
         return [a["title"] for a in resp.get("articles", [])[:page_size] if a.get("title")]
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to fetch headlines for query '%s': %s.", query, exc)
         return []
 
 
@@ -258,6 +307,7 @@ def analyze_sentiment(ticker: str) -> str:
     """Assess stock-specific sentiment from recent news headlines."""
     headlines = _fetch_headlines(ticker, page_size=5)
     if not headlines:
+        logger.info("No headlines found for %s – returning NEUTRAL sentiment.", ticker)
         return "NEUTRAL"
 
     news_text = " | ".join(headlines)
@@ -269,7 +319,8 @@ Deduce the market sentiment. Reply ONLY with one word: BULLISH, BEARISH, or NEUT
     prompt = PromptTemplate(template=template, input_variables=["ticker", "news"])
     try:
         result = (prompt | llm).invoke({"ticker": ticker, "news": news_text}).strip().upper()
-    except Exception:
+    except Exception as exc:
+        logger.warning("LLM sentiment analysis failed for %s: %s. Returning NEUTRAL.", ticker, exc)
         return "NEUTRAL"
     for word in ("BULLISH", "BEARISH", "NEUTRAL"):
         if word in result:
@@ -300,17 +351,14 @@ def get_technical_signal(ticker: str) -> str:
                 close = df["close"].values.astype(float)
                 rsi_arr = talib.RSI(close, timeperiod=14)
                 current_rsi = float(rsi_arr[-1])
-    except Exception as e:
-        print(f"  [WARN] Live OHLCV fetch failed for {ticker}: {e}. Using mock data.")
+    except Exception as exc:
+        logger.warning(
+            "Live OHLCV fetch failed for %s: %s. Returning NEUTRAL technical signal.", ticker, exc
+        )
 
     if current_rsi is None:
-        mock_close = [
-            150.0, 151.0, 152.0, 149.0, 148.0, 145.0, 143.0, 140.0,
-            138.0, 135.0, 130.0, 128.0, 125.0, 124.0, 123.0,
-        ]
-        df_mock = pd.DataFrame({"close": mock_close})
-        rsi_arr = talib.RSI(df_mock["close"].values, timeperiod=14)
-        current_rsi = float(rsi_arr[-1])
+        logger.warning("No RSI data available for %s – returning NEUTRAL technical signal.", ticker)
+        return "NEUTRAL"
 
     if current_rsi < 30:
         return "BULLISH"
@@ -323,6 +371,7 @@ def analyze_geopolitics() -> str:
     """Assess global geopolitical risk level from recent news."""
     headlines = _fetch_headlines("geopolitical risk war conflict sanctions trade war", page_size=5)
     if not headlines:
+        logger.info("No geopolitics headlines found – returning MEDIUM_RISK.")
         return "MEDIUM_RISK"
     news_text = " | ".join(headlines)
     template = """
@@ -334,7 +383,8 @@ Reply ONLY with one of: LOW_RISK, MEDIUM_RISK, or HIGH_RISK.
     try:
         chain = PromptTemplate(template=template, input_variables=["news"]) | llm
         result = chain.invoke({"news": news_text}).strip().upper()
-    except Exception:
+    except Exception as exc:
+        logger.warning("LLM geopolitics analysis failed: %s. Returning MEDIUM_RISK.", exc)
         return "MEDIUM_RISK"
     for level in ("LOW_RISK", "MEDIUM_RISK", "HIGH_RISK"):
         if level in result:
@@ -346,6 +396,7 @@ def analyze_fed_rate() -> str:
     """Assess Federal Reserve rate policy stance from recent news."""
     headlines = _fetch_headlines("Federal Reserve interest rate inflation FOMC", page_size=5)
     if not headlines:
+        logger.info("No Fed rate headlines found – returning NEUTRAL.")
         return "NEUTRAL"
     news_text = " | ".join(headlines)
     template = """
@@ -356,7 +407,8 @@ Assess the Fed's current policy stance. Reply ONLY with one of: HAWKISH, DOVISH,
     try:
         chain = PromptTemplate(template=template, input_variables=["news"]) | llm
         result = chain.invoke({"news": news_text}).strip().upper()
-    except Exception:
+    except Exception as exc:
+        logger.warning("LLM Fed rate analysis failed: %s. Returning NEUTRAL.", exc)
         return "NEUTRAL"
     for stance in ("HAWKISH", "DOVISH", "NEUTRAL"):
         if stance in result:
@@ -368,6 +420,7 @@ def analyze_market_fear() -> str:
     """Assess market fear/VIX level from recent headlines."""
     headlines = _fetch_headlines("VIX volatility index market fear S&P 500 crash rally", page_size=5)
     if not headlines:
+        logger.info("No market fear headlines found – returning MEDIUM.")
         return "MEDIUM"
     news_text = " | ".join(headlines)
     template = """
@@ -379,7 +432,8 @@ Reply ONLY with one of: HIGH (high fear, VIX>30), MEDIUM (moderate fear, VIX 15-
     try:
         chain = PromptTemplate(template=template, input_variables=["news"]) | llm
         result = chain.invoke({"news": news_text}).strip().upper()
-    except Exception:
+    except Exception as exc:
+        logger.warning("LLM market fear analysis failed: %s. Returning MEDIUM.", exc)
         return "MEDIUM"
     for level in ("HIGH", "MEDIUM", "LOW"):
         if level in result:
@@ -456,8 +510,9 @@ REASON: [One sentence explanation]
             "stop_pct": f"{stop_pct * 100:.1f}",
             "take_pct": f"{take_pct * 100:.1f}",
         }).strip()
-    except Exception as e:
-        return "HOLD", False, f"LLM error: {e}", ""
+    except Exception as exc:
+        logger.error("LLM pre-trade analysis failed for %s: %s.", ticker, exc)
+        return "HOLD", False, f"LLM error: {exc}", ""
 
     direction = "HOLD"
     should_trade = False
@@ -519,7 +574,7 @@ def execute_trade(
 
     current_price = get_current_price(ticker)
     if current_price is None:
-        print(f"  [WARN] Cannot fetch current price for {ticker} – skipping trade to preserve ring fence.")
+        logger.warning("Cannot fetch current price for %s – skipping trade to preserve ring fence.", ticker)
         return
     portfolio_value = get_portfolio_value()
     qty = calculate_position_size(current_price, portfolio_value)
@@ -567,8 +622,10 @@ def execute_trade(
     price_str = f"{filled_price:.4f}" if filled_price else "pending"
     stop_str = f"{stop_price:.2f}" if stop_price else "N/A"
     take_str = f"{take_price:.2f}" if take_price else "N/A"
-    print(f"  → {direction} {qty}x {ticker} @ {price_str} | Stop: {stop_str} | Target: {take_str}")
-    print(f"    Reason: {reason}")
+    logger.info(
+        "→ %s %dx %s @ %s | Stop: %s | Target: %s | Reason: %s",
+        direction, qty, ticker, price_str, stop_str, take_str, reason,
+    )
 
     cursor = conn.cursor()
     cursor.execute(
@@ -622,17 +679,17 @@ def _close_position(conn, ticker: str, qty: float, close_side: str, current_pric
             (ticker, close_side, qty, filled_price, realized_pnl, reason),
         )
         conn.commit()
-        print(f"  → Closed {ticker}: {close_side} {qty} @ {filled_price} | PnL: {realized_pnl:.2f}")
-    except Exception as e:
-        print(f"  [ERROR] Failed to close {ticker}: {e}")
+        logger.info("→ Closed %s: %s %s @ %s | PnL: %.2f", ticker, close_side, qty, filled_price, realized_pnl)
+    except Exception as exc:
+        logger.error("Failed to close position %s: %s", ticker, exc)
 
 
 def monitor_positions(conn, stop_pct: float, take_pct: float) -> None:
     """Check all open positions and close any that have hit stop loss or take profit."""
     try:
         positions = trading_client.get_all_positions()
-    except Exception as e:
-        print(f"  [WARN] Could not fetch positions: {e}")
+    except Exception as exc:
+        logger.warning("Could not fetch positions: %s", exc)
         return
 
     for pos in positions:
@@ -648,12 +705,12 @@ def monitor_positions(conn, stop_pct: float, take_pct: float) -> None:
             if current_price <= stop_price:
                 reason = (f"Stop loss triggered: price {current_price:.2f} <= "
                           f"{stop_price:.2f} ({stop_pct * 100:.1f}% down)")
-                print(f"  [STOP LOSS]   LONG {ticker}: {reason}")
+                logger.warning("[STOP LOSS]   LONG %s: %s", ticker, reason)
                 _close_position(conn, ticker, qty, "SELL", current_price, reason)
             elif current_price >= take_price:
                 reason = (f"Take profit triggered: price {current_price:.2f} >= "
                           f"{take_price:.2f} ({take_pct * 100:.1f}% up)")
-                print(f"  [TAKE PROFIT] LONG {ticker}: {reason}")
+                logger.info("[TAKE PROFIT] LONG %s: %s", ticker, reason)
                 _close_position(conn, ticker, qty, "SELL", current_price, reason)
 
         elif pos_side == "short":
@@ -662,55 +719,65 @@ def monitor_positions(conn, stop_pct: float, take_pct: float) -> None:
             if current_price >= stop_price:
                 reason = (f"Stop loss triggered: price {current_price:.2f} >= "
                           f"{stop_price:.2f} ({stop_pct * 100:.1f}% up)")
-                print(f"  [STOP LOSS]   SHORT {ticker}: {reason}")
+                logger.warning("[STOP LOSS]   SHORT %s: %s", ticker, reason)
                 _close_position(conn, ticker, qty, "BUY", current_price, reason)
             elif current_price <= take_price:
                 reason = (f"Take profit triggered: price {current_price:.2f} <= "
                           f"{take_price:.2f} ({take_pct * 100:.1f}% down)")
-                print(f"  [TAKE PROFIT] SHORT {ticker}: {reason}")
+                logger.info("[TAKE PROFIT] SHORT %s: %s", ticker, reason)
                 _close_position(conn, ticker, qty, "BUY", current_price, reason)
 
 
 # --- Main Trading Loop ---
 def main():
-    conn = init_db()
+    _validate_credentials()
+    _check_ollama_health()
+
+    try:
+        conn = init_db()
+    except Exception as exc:
+        logger.error("Failed to initialise database: %s", exc)
+        return
 
     # Read configurable risk settings (may be overridden via the dashboard UI)
     stop_pct = read_setting(conn, "stop_loss_pct", STOP_LOSS_PCT)
     take_pct = read_setting(conn, "take_profit_pct", TAKE_PROFIT_PCT)
 
     daily_count = get_daily_trade_count(conn)
-    print("Hedge Fund Bot Initialised. Analysing market...")
-    print(f"Trades today: {daily_count}/{DAILY_MAX_TRADES}")
-    print(f"Risk params  : Stop={stop_pct * 100:.1f}% | Take={take_pct * 100:.1f}% | Ring fence={MAX_POSITION_PCT * 100:.1f}%")
+    logger.info("Hedge Fund Bot Initialised. Analysing market...")
+    logger.info("Trades today: %d/%d", daily_count, DAILY_MAX_TRADES)
+    logger.info(
+        "Risk params: Stop=%.1f%% | Take=%.1f%% | Ring fence=%.1f%%",
+        stop_pct * 100, take_pct * 100, MAX_POSITION_PCT * 100,
+    )
 
     if daily_count >= DAILY_MAX_TRADES:
-        print(f"Daily maximum of {DAILY_MAX_TRADES} trades already reached. Exiting.")
+        logger.warning("Daily maximum of %d trades already reached. Exiting.", DAILY_MAX_TRADES)
         return
 
     # Step 1: Monitor open positions for stop loss / take profit
-    print("\n[Position Monitor] Checking open positions...")
+    logger.info("[Position Monitor] Checking open positions...")
     monitor_positions(conn, stop_pct, take_pct)
 
     # Step 2: Compute market-wide signals once (shared across all tickers)
-    print("\n[Market Analysis] Gathering market-wide signals...")
+    logger.info("[Market Analysis] Gathering market-wide signals...")
     geopolitics = analyze_geopolitics()
     fed_rate = analyze_fed_rate()
     fear_level = analyze_market_fear()
-    print(f"  Geopolitics: {geopolitics} | Fed Rate: {fed_rate} | Market Fear: {fear_level}")
+    logger.info("Geopolitics: %s | Fed Rate: %s | Market Fear: %s", geopolitics, fed_rate, fear_level)
 
     # Step 3: Per-ticker analysis and execution
     for ticker in TICKERS:
         daily_count = get_daily_trade_count(conn)
         if daily_count >= DAILY_MAX_TRADES:
-            print(f"\nDaily maximum of {DAILY_MAX_TRADES} trades reached. Stopping.")
+            logger.warning("Daily maximum of %d trades reached. Stopping.", DAILY_MAX_TRADES)
             break
 
-        print(f"\n[{ticker}] Analysing... (trades today: {daily_count})")
+        logger.info("[%s] Analysing... (trades today: %d)", ticker, daily_count)
 
         sentiment = analyze_sentiment(ticker)
         technical = get_technical_signal(ticker)
-        print(f"  Sentiment: {sentiment} | Technical: {technical}")
+        logger.info("  Sentiment: %s | Technical: %s", sentiment, technical)
 
         signals = {
             "sentiment": sentiment,
@@ -725,7 +792,7 @@ def main():
             ticker, sentiment, technical, geopolitics, fed_rate, fear_level,
             stop_pct, take_pct,
         )
-        print(f"  AI Decision: {direction} | Trade: {should_trade} | {reason}")
+        logger.info("  AI Decision: %s | Trade: %s | %s", direction, should_trade, reason)
 
         trade_ok, final_direction, final_reason = assess_risk(
             daily_count, direction, should_trade, reason
@@ -734,10 +801,10 @@ def main():
         if trade_ok:
             execute_trade(conn, ticker, final_direction, final_reason, full_analysis, signals, stop_pct, take_pct)
         else:
-            print(f"  → Skipping {ticker}: {final_reason}")
+            logger.info("  → Skipping %s: %s", ticker, final_reason)
 
     daily_count = get_daily_trade_count(conn)
-    print(f"\nSession complete. Trades today: {daily_count}/{DAILY_MAX_TRADES}.")
+    logger.info("Session complete. Trades today: %d/%d.", daily_count, DAILY_MAX_TRADES)
 
 
 if __name__ == "__main__":

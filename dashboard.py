@@ -1,3 +1,4 @@
+import logging
 import os
 import sqlite3
 from datetime import date, datetime
@@ -5,6 +6,8 @@ from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = os.getenv("TRADING_DB_PATH", "trading_bot.db")
 DAILY_MAX_TRADES = int(os.getenv("DAILY_MAX_TRADES", "1000"))
@@ -22,7 +25,8 @@ def _get_conn():
         return None
     try:
         return sqlite3.connect(DB_PATH)
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        logger.warning("Failed to open database at '%s': %s", DB_PATH, exc)
         return None
 
 
@@ -40,8 +44,8 @@ def write_setting(key: str, value: float) -> None:
             (key, str(value), datetime.utcnow().isoformat()),
         )
         conn.commit()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to write setting '%s'=%s to DB: %s", key, value, exc)
     finally:
         conn.close()
 
@@ -54,7 +58,8 @@ def read_setting(key: str, default: float) -> float:
         cursor = conn.execute("SELECT value FROM settings WHERE key = ?", (key,))
         row = cursor.fetchone()
         return float(row[0]) if row else default
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to read setting '%s' from DB: %s. Using default %s.", key, exc, default)
         return default
     finally:
         conn.close()
@@ -111,7 +116,8 @@ def load_trades(db_path: str) -> pd.DataFrame:
         with sqlite3.connect(db_path) as conn:
             trades = pd.read_sql_query("SELECT rowid AS trade_rowid, * FROM trades", conn)
         return trades
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        logger.warning("Failed to load trades from '%s': %s", db_path, exc)
         return pd.DataFrame()
 
 
