@@ -6,6 +6,7 @@ from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 
+from db.queries import read_setting as _db_read_setting, write_setting as _db_write_setting
 
 logger = logging.getLogger(__name__)
 
@@ -35,17 +36,7 @@ def write_setting(key: str, value: float) -> None:
     if conn is None:
         return
     try:
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS settings "
-            "(key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)"
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-            (key, str(value), datetime.utcnow().isoformat()),
-        )
-        conn.commit()
-    except Exception as exc:
-        logger.warning("Failed to write setting '%s'=%s to DB: %s", key, value, exc)
+        _db_write_setting(conn, key, value)
     finally:
         conn.close()
 
@@ -55,12 +46,7 @@ def read_setting(key: str, default: float) -> float:
     if conn is None:
         return default
     try:
-        cursor = conn.execute("SELECT value FROM settings WHERE key = ?", (key,))
-        row = cursor.fetchone()
-        return float(row[0]) if row else default
-    except Exception as exc:
-        logger.warning("Failed to read setting '%s' from DB: %s. Using default %s.", key, exc, default)
-        return default
+        return _db_read_setting(conn, key, default)
     finally:
         conn.close()
 
