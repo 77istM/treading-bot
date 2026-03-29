@@ -1,12 +1,14 @@
 import os
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime
 
 import pandas as pd
 import streamlit as st
 
 
 DB_PATH = os.getenv("TRADING_DB_PATH", "trading_bot.db")
+DAILY_MIN_TRADES = int(os.getenv("DAILY_MIN_TRADES", "20"))
+DAILY_MAX_TRADES = int(os.getenv("DAILY_MAX_TRADES", "100"))
 
 st.set_page_config(page_title="Trading Bot Dashboard", layout="wide")
 st.title("Trading Bot Dashboard")
@@ -75,16 +77,29 @@ pnl_df, pnl_label = build_pnl_frame(trades_df)
 total_trades = len(trades_df)
 buy_trades = 0
 sell_trades = 0
+daily_trades = 0
 if "side" in trades_df.columns:
     side_normalized = trades_df["side"].astype(str).str.upper()
     buy_trades = side_normalized.isin(["BULLISH", "BUY", "LONG"]).sum()
     sell_trades = side_normalized.isin(["BEARISH", "SELL", "SHORT"]).sum()
 
-col1, col2, col3, col4 = st.columns(4)
+if "created_at" in trades_df.columns:
+    today_str = date.today().isoformat()
+    daily_trades = trades_df[
+        trades_df["created_at"].astype(str).str.startswith(today_str)
+    ].shape[0]
+
+col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Total Trades", total_trades)
 col2.metric("Buy Trades", int(buy_trades))
 col3.metric("Sell Trades", int(sell_trades))
 col4.metric("Net", int(buy_trades - sell_trades))
+col5.metric(
+    f"Trades Today ({date.today().isoformat()})",
+    f"{daily_trades} / {DAILY_MAX_TRADES}",
+    delta=f"min target: {DAILY_MIN_TRADES}",
+    delta_color="off",
+)
 
 st.subheader("PnL Curve")
 st.line_chart(pnl_df.set_index("trade_rowid" if "trade_rowid" in pnl_df.columns else pnl_df.index)["cumulative_pnl"])

@@ -1,5 +1,7 @@
 import os
 import sqlite3
+from datetime import date
+
 import pandas as pd
 import talib
 import requests
@@ -13,7 +15,16 @@ from langchain_core.prompts import PromptTemplate
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-TICKER = "AAPL"
+
+# Support multiple tickers via the TICKERS env var (comma-separated) or fall back to defaults.
+_tickers_env = os.getenv("TICKERS", "AAPL,MSFT,GOOGL,AMZN,TSLA")
+TICKERS = [t.strip().upper() for t in _tickers_env.split(",") if t.strip()]
+
+# Daily trade limits (risk assessment ruleset).
+# Between 20 and 100 trades are allowed per calendar day; the counters reset at midnight
+# and do NOT carry over to the next day.
+DAILY_MIN_TRADES = 20   # Below this count the confluence requirement is relaxed.
+DAILY_MAX_TRADES = 100  # Hard cap – no new trades are submitted once this is reached.
 
 # Initialise Clients
 trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET, paper=True)
@@ -47,6 +58,23 @@ def init_db():
 
     conn.commit()
     return conn
+
+
+def get_daily_trade_count(conn) -> int:
+    """Return the number of trades executed today (calendar day, UTC).
+
+    The count is derived purely from the ``created_at`` column in the trades
+    table, so it resets automatically at midnight with no carry-over to the
+    next day.
+    """
+    today = date.today().isoformat()  # e.g. "2026-03-29"
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT COUNT(*) FROM trades WHERE DATE(created_at) = ?",
+        (today,),
+    )
+    row = cursor.fetchone()
+    return row[0] if row else 0
 
 
 def _side_to_direction(side):
@@ -155,16 +183,16 @@ def get_technical_signal(ticker):
         return "BEARISH" # Overbought
     return "NEUTRAL"
 
-# --- Execution Engine ---
-def execute_trade(ticker, side, reason, conn):
+# --- Execution Engine (long-only) ---
+def execute_trade(ticker, reason, conn):
+    """Submit a long (BUY) market order. Short and inverse trades are prohibited."""
     market_order_data = MarketOrderRequest(
         symbol=ticker,
         qty=1,
-        side=OrderSide.BUY if side == "BULLISH" else OrderSide.SELL,
-        time_in_force=TimeInForce.GTC
+        side=OrderSide.BUY,
+        time_in_force=TimeInForce.GTC,
     )
-    
-    # Execute via Alpaca
+
     order = trading_client.submit_order(order_data=market_order_data)
 
     filled_price = None
@@ -176,38 +204,121 @@ def execute_trade(ticker, side, reason, conn):
             filled_price = None
 
     qty = 1.0
-    realized_pnl = calculate_realized_pnl(conn, ticker, side, qty, filled_price)
+    realized_pnl = calculate_realized_pnl(conn, ticker, "BUY", qty, filled_price)
 
     if filled_price is not None:
-        print(f"Executed {side} order for {ticker} @ {filled_price:.4f}. Reason: {reason}")
+        print(f"  → BUY {ticker} @ {filled_price:.4f}. Reason: {reason}")
     else:
-        print(f"Executed {side} order for {ticker}. Fill price pending. Reason: {reason}")
-    
+        print(f"  → BUY {ticker}. Fill price pending. Reason: {reason}")
+
     # Log to SQLite
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO trades (ticker, side, qty, price, realized_pnl, reason) VALUES (?, ?, ?, ?, ?, ?)",
-        (ticker, side, qty, filled_price, realized_pnl, reason),
+        (ticker, "BUY", qty, filled_price, realized_pnl, reason),
     )
     conn.commit()
+
+
+# --- Risk Assessment ---
+def assess_risk(daily_count: int, sentiment: str, technical_signal: str) -> tuple:
+    """Apply risk rules and decide whether to execute a BUY trade.
+
+    Rules
+    -----
+    1. Hard cap: no trades when ``daily_count >= DAILY_MAX_TRADES``.
+    2. Long-only policy: BEARISH-only signals never trigger a trade.
+       Short and inverse trades are strictly prohibited.
+    3. Confluence mode (``daily_count >= DAILY_MIN_TRADES``): both the
+       sentiment *and* technical signals must be BULLISH.
+    4. Minimum-reach mode (``daily_count < DAILY_MIN_TRADES``): a single
+       BULLISH signal is sufficient to help meet the daily minimum.
+
+    Returns
+    -------
+    (should_trade: bool, reason: str)
+    """
+    if daily_count >= DAILY_MAX_TRADES:
+        return False, (
+            f"Daily maximum of {DAILY_MAX_TRADES} trades reached – halting for today."
+        )
+
+    both_bullish = sentiment == "BULLISH" and technical_signal == "BULLISH"
+    either_bullish = sentiment == "BULLISH" or technical_signal == "BULLISH"
+    bearish_only = not either_bullish and (
+        sentiment == "BEARISH" or technical_signal == "BEARISH"
+    )
+
+    # Never go short or inverse – bearish-only signals are skipped.
+    if bearish_only:
+        return False, (
+            "Bearish signal detected – holding (long-only policy; short/inverse trades prohibited)."
+        )
+
+    if both_bullish:
+        return True, "Confluence: both sentiment and technical signals are BULLISH."
+
+    # Below minimum threshold: accept a single BULLISH signal to aid minimum activity.
+    if daily_count < DAILY_MIN_TRADES and either_bullish:
+        return True, (
+            f"Single BULLISH signal accepted (daily count {daily_count} is below "
+            f"the minimum target of {DAILY_MIN_TRADES} trades)."
+        )
+
+    return False, "Signals mixed or neutral – holding position to preserve capital."
+
 
 # --- Main Trading Loop ---
 def main():
     conn = init_db()
+    daily_count = get_daily_trade_count(conn)
     print("Agent Initialised. Analysing market...")
-    
-    sentiment = analyze_sentiment(TICKER)
-    technical_signal = get_technical_signal(TICKER)
-    
-    print(f"[{TICKER}] Sentiment: {sentiment} | Technicals: {technical_signal}")
-    
-    # Confluence Check: Only trade if Brain and Technicals agree
-    if sentiment == "BULLISH" and technical_signal == "BULLISH":
-        execute_trade(TICKER, "BULLISH", "Confluence: RSI Oversold + Positive News", conn)
-    elif sentiment == "BEARISH" and technical_signal == "BEARISH":
-        execute_trade(TICKER, "BEARISH", "Confluence: RSI Overbought + Negative News", conn)
+    print(
+        f"Daily trade count so far: {daily_count}/{DAILY_MAX_TRADES} "
+        f"(minimum target: {DAILY_MIN_TRADES})"
+    )
+
+    if daily_count >= DAILY_MAX_TRADES:
+        print(
+            f"Daily maximum of {DAILY_MAX_TRADES} trades already reached. "
+            "No further trades today."
+        )
+        return
+
+    for ticker in TICKERS:
+        # Re-read the count so the cap is respected even within one run.
+        daily_count = get_daily_trade_count(conn)
+        if daily_count >= DAILY_MAX_TRADES:
+            print(
+                f"Daily maximum of {DAILY_MAX_TRADES} trades reached mid-run. "
+                "Stopping for today."
+            )
+            break
+
+        sentiment = analyze_sentiment(ticker)
+        technical_signal = get_technical_signal(ticker)
+
+        print(
+            f"[{ticker}] Sentiment: {sentiment} | Technicals: {technical_signal} "
+            f"| Trades today: {daily_count}"
+        )
+
+        should_trade, reason = assess_risk(daily_count, sentiment, technical_signal)
+        if should_trade:
+            execute_trade(ticker, reason, conn)
+            daily_count = get_daily_trade_count(conn)
+        else:
+            print(f"  → Skipping {ticker}: {reason}")
+
+    daily_count = get_daily_trade_count(conn)
+    if daily_count < DAILY_MIN_TRADES:
+        print(
+            f"Warning: only {daily_count} trade(s) executed today, below the minimum "
+            f"target of {DAILY_MIN_TRADES}. Consider scheduling the bot more frequently "
+            "or expanding the ticker list."
+        )
     else:
-        print("Signals mixed. Holding position to preserve capital.")
+        print(f"Session complete. Trades today: {daily_count}/{DAILY_MAX_TRADES}.")
 
 if __name__ == "__main__":
     main()
