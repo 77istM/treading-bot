@@ -38,7 +38,7 @@ def get_current_price(ticker: str) -> float | None:
     return None
 
 
-def calculate_position_size(price: float, portfolio_value: float) -> int:
+def calculate_position_size(price: float | None, portfolio_value: float) -> int:
     """Ring fence: allocate at most MAX_POSITION_PCT of portfolio per trade."""
     if price is None or price <= 0:
         logger.warning(

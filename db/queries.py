@@ -1,6 +1,6 @@
 import logging
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def write_setting(conn: sqlite3.Connection, key: str, value: float) -> None:
         )
         conn.execute(
             "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-            (key, str(value), datetime.utcnow().isoformat()),
+            (key, str(value), datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
     except Exception as exc:
