@@ -23,10 +23,100 @@ llm = Ollama(model="llama3.2:3b", base_url="http://localhost:11434")
 def init_db():
     conn = sqlite3.connect('trading_bot.db')
     cursor = conn.cursor()
+
+    # Keep table compatible with old runs while adding columns needed for real PnL tracking.
     cursor.execute('''CREATE TABLE IF NOT EXISTS trades 
-                      (id INTEGER PRIMARY KEY, ticker TEXT, side TEXT, qty REAL, reason TEXT)''')
+                      (id INTEGER PRIMARY KEY,
+                       ticker TEXT,
+                       side TEXT,
+                       qty REAL,
+                       price REAL,
+                       realized_pnl REAL DEFAULT 0,
+                       reason TEXT,
+                       created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
+
+    cursor.execute("PRAGMA table_info(trades)")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+
+    if 'price' not in existing_columns:
+        cursor.execute("ALTER TABLE trades ADD COLUMN price REAL")
+    if 'realized_pnl' not in existing_columns:
+        cursor.execute("ALTER TABLE trades ADD COLUMN realized_pnl REAL DEFAULT 0")
+    if 'created_at' not in existing_columns:
+        cursor.execute("ALTER TABLE trades ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP")
+
     conn.commit()
     return conn
+
+
+def _side_to_direction(side):
+    normalized = str(side).upper()
+    if normalized in {"BULLISH", "BUY", "LONG"}:
+        return 1
+    if normalized in {"BEARISH", "SELL", "SHORT"}:
+        return -1
+    return 0
+
+
+def _apply_trade_to_position(position_qty, entry_price, side, qty, price):
+    """Apply one trade to a running position and return new state + realized PnL."""
+    direction = _side_to_direction(side)
+    if direction == 0 or qty <= 0 or price is None:
+        return position_qty, entry_price, 0.0
+
+    trade_qty = direction * qty
+    realized = 0.0
+
+    if position_qty == 0 or (position_qty > 0 and trade_qty > 0) or (position_qty < 0 and trade_qty < 0):
+        new_qty = position_qty + trade_qty
+        weighted_cost = (abs(position_qty) * entry_price) + (abs(trade_qty) * price)
+        new_entry = weighted_cost / abs(new_qty) if new_qty != 0 else 0.0
+        return new_qty, new_entry, realized
+
+    close_qty = min(abs(position_qty), abs(trade_qty))
+    if position_qty > 0 and trade_qty < 0:
+        realized = (price - entry_price) * close_qty
+    elif position_qty < 0 and trade_qty > 0:
+        realized = (entry_price - price) * close_qty
+
+    new_qty = position_qty + trade_qty
+    if new_qty == 0:
+        return 0.0, 0.0, realized
+
+    if (position_qty > 0 > new_qty) or (position_qty < 0 < new_qty):
+        return new_qty, price, realized
+
+    return new_qty, entry_price, realized
+
+
+def calculate_realized_pnl(conn, ticker, side, qty, price):
+    """Calculate realized PnL impact of the next trade against stored trade history."""
+    if price is None:
+        return 0.0
+
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT side, qty, price FROM trades WHERE ticker = ? ORDER BY id ASC",
+        (ticker,)
+    )
+    historical_trades = cursor.fetchall()
+
+    position_qty = 0.0
+    entry_price = 0.0
+
+    for hist_side, hist_qty, hist_price in historical_trades:
+        hist_qty = float(hist_qty) if hist_qty is not None else 0.0
+        hist_price = float(hist_price) if hist_price is not None else None
+        position_qty, entry_price, _ = _apply_trade_to_position(
+            position_qty,
+            entry_price,
+            hist_side,
+            hist_qty,
+            hist_price,
+        )
+
+    _, _, realized = _apply_trade_to_position(position_qty, entry_price, side, qty, price)
+    return float(realized)
 
 # --- The "Brain" (Sentiment Analysis) ---
 def analyze_sentiment(ticker):
@@ -75,13 +165,30 @@ def execute_trade(ticker, side, reason, conn):
     )
     
     # Execute via Alpaca
-    trading_client.submit_order(order_data=market_order_data)
-    print(f"Executed {side} order for {ticker}. Reason: {reason}")
+    order = trading_client.submit_order(order_data=market_order_data)
+
+    filled_price = None
+    raw_price = getattr(order, "filled_avg_price", None)
+    if raw_price is not None:
+        try:
+            filled_price = float(raw_price)
+        except (TypeError, ValueError):
+            filled_price = None
+
+    qty = 1.0
+    realized_pnl = calculate_realized_pnl(conn, ticker, side, qty, filled_price)
+
+    if filled_price is not None:
+        print(f"Executed {side} order for {ticker} @ {filled_price:.4f}. Reason: {reason}")
+    else:
+        print(f"Executed {side} order for {ticker}. Fill price pending. Reason: {reason}")
     
     # Log to SQLite
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO trades (ticker, side, qty, reason) VALUES (?, ?, ?, ?)", 
-                   (ticker, side, 1.0, reason))
+    cursor.execute(
+        "INSERT INTO trades (ticker, side, qty, price, realized_pnl, reason) VALUES (?, ?, ?, ?, ?, ?)",
+        (ticker, side, qty, filled_price, realized_pnl, reason),
+    )
     conn.commit()
 
 # --- Main Trading Loop ---
