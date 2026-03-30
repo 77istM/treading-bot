@@ -2,11 +2,15 @@ import logging
 import logging.handlers
 import os
 
+from dotenv import load_dotenv
 import requests
 from alpaca.trading.client import TradingClient
-from langchain_community.llms import Ollama
+from langchain_ollama import OllamaLLM
 
 from hardening.secrets import SecretsVault
+
+# Load .env file if it exists
+load_dotenv()
 
 try:
     from alpaca.data.historical import StockHistoricalDataClient
@@ -123,7 +127,7 @@ data_client = (
     if _has_data_client and ALPACA_API_KEY and ALPACA_SECRET
     else None
 )
-llm = Ollama(
+llm = OllamaLLM(
     model=_vault.get("OLLAMA_MODEL", "llama3.2:3b") or "llama3.2:3b",
     base_url=_vault.get("OLLAMA_BASE_URL", "http://localhost:11434") or "http://localhost:11434",
 )

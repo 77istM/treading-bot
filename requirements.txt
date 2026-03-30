@@ -5,6 +5,8 @@ requests
 langchain
 langchain-community
 langchain-core
+langchain-ollama
+python-dotenv
 streamlit>=1.28.0
 altair>=4.0,<6.0
 tzdata
