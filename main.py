@@ -32,8 +32,10 @@ from reflection.engine import (
     eod_already_run_today,
 )
 from risk.controller import PortfolioRiskController
+from hardening.alerts import get_notifier
 
 logger = logging.getLogger(__name__)
+notifier = get_notifier()
 
 # ---------------------------------------------------------------------------
 # Graceful-shutdown support
@@ -97,11 +99,27 @@ def _run_trading_cycle(conn, risk_ctrl: PortfolioRiskController) -> None:
                 pnl=event.get("pnl", 0.0),
                 stop_reason=event["reason"],
             )
+            notifier.send(
+                level="warning",
+                title="Stop Loss Triggered",
+                message=f"{event['ticker']} closed by stop-loss.",
+                details={
+                    "trade_id": event.get("trade_id"),
+                    "reason": event.get("reason"),
+                    "pnl": event.get("pnl", 0.0),
+                },
+            )
 
     # Step 2 — Portfolio risk gate
     can_trade, halt_reason = risk_ctrl.can_trade()
     if not can_trade:
         logger.warning("[RISK GATE] Skipping new trades this cycle: %s", halt_reason)
+        notifier.send(
+            level="warning",
+            title="Risk Gate Halt",
+            message="New trades blocked by portfolio risk controller.",
+            details={"reason": halt_reason},
+        )
         return
 
     # Step 3 — Daily trade-count gate
@@ -243,13 +261,27 @@ def _run_trading_cycle(conn, risk_ctrl: PortfolioRiskController) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    _validate_credentials()
-    _check_ollama_health()
+    try:
+        _validate_credentials()
+        _check_ollama_health()
+    except Exception as exc:
+        logger.error("Startup validation failed: %s", exc)
+        notifier.send(
+            level="critical",
+            title="Startup Validation Failed",
+            message=str(exc),
+        )
+        return
 
     try:
         conn = init_db()
     except Exception as exc:
         logger.error("Failed to initialise database: %s", exc)
+        notifier.send(
+            level="critical",
+            title="Database Init Failed",
+            message=str(exc),
+        )
         return
 
     stop_pct = read_setting(conn, "stop_loss_pct", STOP_LOSS_PCT)
@@ -261,6 +293,16 @@ def main() -> None:
     logger.info(
         "Risk params: Stop=%.1f%% | Take=%.1f%% | Ring fence=%.1f%% | Cycle=%ds",
         stop_pct * 100, take_pct * 100, MAX_POSITION_PCT * 100, LOOP_INTERVAL_SECONDS,
+    )
+    notifier.send(
+        level="info",
+        title="Bot Started",
+        message="Trading bot entered continuous loop mode.",
+        details={
+            "tickers": len(TICKERS),
+            "daily_trade_limit": DAILY_MAX_TRADES,
+            "cycle_seconds": LOOP_INTERVAL_SECONDS,
+        },
     )
 
     risk_ctrl = PortfolioRiskController(conn)
@@ -292,6 +334,11 @@ def main() -> None:
             _run_trading_cycle(conn, risk_ctrl)
         except Exception as exc:
             logger.error("Unhandled error in trading cycle: %s", exc, exc_info=True)
+            notifier.send(
+                level="error",
+                title="Trading Cycle Error",
+                message=str(exc),
+            )
 
         daily_count = get_daily_trade_count(conn)
         logger.info("Cycle complete. Trades today: %d/%d. Sleeping %ds.",
@@ -299,6 +346,11 @@ def main() -> None:
         time.sleep(LOOP_INTERVAL_SECONDS)
 
     logger.info("Bot stopped cleanly.")
+    notifier.send(
+        level="info",
+        title="Bot Stopped",
+        message="Trading bot shut down cleanly.",
+    )
 
 
 if __name__ == "__main__":
