@@ -2,6 +2,20 @@
 
 ## 📊 Implementation Status
 
+## Crypto Trading Support
+
+The bot can now trade crypto symbols on Alpaca paper trading so you can test outside stock market hours.
+
+- Configure crypto symbols with `CRYPTO_TICKERS` (examples: `BTC/USD,ETH/USD` or `BTCUSD,ETHUSD`).
+- Crypto risk defaults are stricter than equities:
+	- `CRYPTO_MAX_POSITION_PCT=0.01`
+	- `CRYPTO_STOP_LOSS_PCT=0.02`
+	- `CRYPTO_TAKE_PROFIT_PCT=0.03`
+	- `ALLOW_CRYPTO_SHORTS=false` (default long-only for safety)
+- When equities are closed, the loop still runs for crypto symbols.
+
+You can keep your stock universe in `TICKERS`; the bot handles both universes together.
+
 | Phase | Name | Status | Notes |
 |-------|------|--------|-------|
 | **Phase 1** | Continuous Loop | ✅ **Done** | Infinite scheduler loop, market-hours gate, graceful shutdown |

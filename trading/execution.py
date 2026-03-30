@@ -4,7 +4,14 @@ import sqlite3
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
 
-from config import trading_client, MAX_ANALYSIS_LENGTH
+from config import (
+    ALLOW_CRYPTO_SHORTS,
+    CRYPTO_MAX_POSITION_PCT,
+    MAX_ANALYSIS_LENGTH,
+    MAX_POSITION_PCT,
+    trading_client,
+    is_crypto_symbol,
+)
 from db.queries import get_latest_signal_snapshot
 from pnl.calculator import calculate_realized_pnl
 from trading.sizing import get_current_price, get_portfolio_value, calculate_position_size
@@ -33,30 +40,43 @@ def execute_trade(
     int | None
         The row id of the inserted trade record, or ``None`` on failure.
     """
+    symbol = ticker.strip().upper().replace("-", "/")
+    crypto = is_crypto_symbol(symbol)
+    if crypto and direction == "SELL" and not ALLOW_CRYPTO_SHORTS:
+        logger.info("Skipping crypto short for %s because ALLOW_CRYPTO_SHORTS=false.", symbol)
+        return None
+
     side = OrderSide.BUY if direction == "BUY" else OrderSide.SELL
 
-    current_price = get_current_price(ticker)
+    current_price = get_current_price(symbol)
     if current_price is None:
         logger.warning(
-            "Cannot fetch current price for %s – skipping trade to preserve ring fence.", ticker
+            "Cannot fetch current price for %s – skipping trade to preserve ring fence.", symbol
         )
         return
     portfolio_value = get_portfolio_value()
-    qty = calculate_position_size(current_price, portfolio_value)
+    qty = calculate_position_size(
+        current_price,
+        portfolio_value,
+        max_position_pct=CRYPTO_MAX_POSITION_PCT if crypto else MAX_POSITION_PCT,
+        allow_fractional=crypto,
+    )
+
+    price_decimals = 6 if crypto else 2
 
     if current_price:
         if direction == "BUY":
-            stop_price = round(current_price * (1 - stop_pct), 2)
-            take_price = round(current_price * (1 + take_pct), 2)
+            stop_price = round(current_price * (1 - stop_pct), price_decimals)
+            take_price = round(current_price * (1 + take_pct), price_decimals)
         else:
-            stop_price = round(current_price * (1 + stop_pct), 2)
-            take_price = round(current_price * (1 - take_pct), 2)
+            stop_price = round(current_price * (1 + stop_pct), price_decimals)
+            take_price = round(current_price * (1 - take_pct), price_decimals)
     else:
         stop_price = None
         take_price = None
 
     market_order_data = MarketOrderRequest(
-        symbol=ticker,
+        symbol=symbol,
         qty=qty,
         side=side,
         time_in_force=TimeInForce.GTC,
@@ -76,20 +96,20 @@ def execute_trade(
     # Recalculate stop/take using actual fill price when available
     if filled_price:
         if direction == "BUY":
-            stop_price = round(filled_price * (1 - stop_pct), 2)
-            take_price = round(filled_price * (1 + take_pct), 2)
+            stop_price = round(filled_price * (1 - stop_pct), price_decimals)
+            take_price = round(filled_price * (1 + take_pct), price_decimals)
         else:
-            stop_price = round(filled_price * (1 + stop_pct), 2)
-            take_price = round(filled_price * (1 - take_pct), 2)
+            stop_price = round(filled_price * (1 + stop_pct), price_decimals)
+            take_price = round(filled_price * (1 - take_pct), price_decimals)
 
-    realized_pnl = calculate_realized_pnl(conn, ticker, direction, qty, filled_price)
+    realized_pnl = calculate_realized_pnl(conn, symbol, direction, qty, filled_price)
 
     price_str = f"{filled_price:.4f}" if filled_price else "pending"
-    stop_str = f"{stop_price:.2f}" if stop_price else "N/A"
-    take_str = f"{take_price:.2f}" if take_price else "N/A"
+    stop_str = f"{stop_price:.{price_decimals}f}" if stop_price else "N/A"
+    take_str = f"{take_price:.{price_decimals}f}" if take_price else "N/A"
     logger.info(
-        "→ %s %dx %s @ %s | Stop: %s | Target: %s | Reason: %s",
-        direction, qty, ticker, price_str, stop_str, take_str, reason,
+        "→ %s %sx %s @ %s | Stop: %s | Target: %s | Reason: %s",
+        direction, qty, symbol, price_str, stop_str, take_str, reason,
     )
 
     cursor = conn.cursor()
@@ -102,7 +122,7 @@ def execute_trade(
             trade_analysis, realized_pnl, reason)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            ticker, direction, float(qty), filled_price, stop_price, take_price,
+            symbol, direction, float(qty), filled_price, stop_price, take_price,
             strategy_name, strategy_regime,
             signals.get("sentiment", "NEUTRAL"),
             signals.get("technical", "NEUTRAL"),

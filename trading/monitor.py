@@ -2,13 +2,20 @@ import logging
 import sqlite3
 
 from config import trading_client
+from config import is_crypto_symbol
 from db.queries import get_latest_signal_snapshot
 from trading.execution import _close_position
 
 logger = logging.getLogger(__name__)
 
 
-def monitor_positions(conn: sqlite3.Connection, stop_pct: float, take_pct: float) -> list[dict]:
+def monitor_positions(
+    conn: sqlite3.Connection,
+    stop_pct: float,
+    take_pct: float,
+    crypto_stop_pct: float | None = None,
+    crypto_take_pct: float | None = None,
+) -> list[dict]:
     """Check all open positions and close any that have hit stop loss or take profit.
 
     Returns
@@ -27,19 +34,22 @@ def monitor_positions(conn: sqlite3.Connection, stop_pct: float, take_pct: float
 
     for pos in positions:
         ticker = pos.symbol
+        is_crypto = is_crypto_symbol(ticker)
+        active_stop_pct = crypto_stop_pct if (is_crypto and crypto_stop_pct is not None) else stop_pct
+        active_take_pct = crypto_take_pct if (is_crypto and crypto_take_pct is not None) else take_pct
         qty = abs(float(pos.qty))
         avg_entry = float(pos.avg_entry_price)
         current_price = float(pos.current_price)
         pos_side = str(pos.side).lower()
 
         if pos_side == "long":
-            stop_price = avg_entry * (1 - stop_pct)
-            take_price = avg_entry * (1 + take_pct)
+            stop_price = avg_entry * (1 - active_stop_pct)
+            take_price = avg_entry * (1 + active_take_pct)
             signal_snapshot = get_latest_signal_snapshot(conn, ticker)
             if current_price <= stop_price:
                 reason = (
                     f"Stop loss triggered: price {current_price:.2f} <= "
-                    f"{stop_price:.2f} ({stop_pct * 100:.1f}% down)"
+                    f"{stop_price:.2f} ({active_stop_pct * 100:.1f}% down)"
                 )
                 logger.warning("[STOP LOSS]   LONG %s: %s", ticker, reason)
                 trade_id = _close_position(
@@ -53,7 +63,7 @@ def monitor_positions(conn: sqlite3.Connection, stop_pct: float, take_pct: float
             elif current_price >= take_price:
                 reason = (
                     f"Take profit triggered: price {current_price:.2f} >= "
-                    f"{take_price:.2f} ({take_pct * 100:.1f}% up)"
+                    f"{take_price:.2f} ({active_take_pct * 100:.1f}% up)"
                 )
                 logger.info("[TAKE PROFIT] LONG %s: %s", ticker, reason)
                 trade_id = _close_position(
@@ -66,13 +76,13 @@ def monitor_positions(conn: sqlite3.Connection, stop_pct: float, take_pct: float
                                 "is_stop_loss": False, "trade_id": trade_id, "signals": signal_snapshot})
 
         elif pos_side == "short":
-            stop_price = avg_entry * (1 + stop_pct)
-            take_price = avg_entry * (1 - take_pct)
+            stop_price = avg_entry * (1 + active_stop_pct)
+            take_price = avg_entry * (1 - active_take_pct)
             signal_snapshot = get_latest_signal_snapshot(conn, ticker)
             if current_price >= stop_price:
                 reason = (
                     f"Stop loss triggered: price {current_price:.2f} >= "
-                    f"{stop_price:.2f} ({stop_pct * 100:.1f}% up)"
+                    f"{stop_price:.2f} ({active_stop_pct * 100:.1f}% up)"
                 )
                 logger.warning("[STOP LOSS]   SHORT %s: %s", ticker, reason)
                 trade_id = _close_position(
@@ -86,7 +96,7 @@ def monitor_positions(conn: sqlite3.Connection, stop_pct: float, take_pct: float
             elif current_price <= take_price:
                 reason = (
                     f"Take profit triggered: price {current_price:.2f} <= "
-                    f"{take_price:.2f} ({take_pct * 100:.1f}% down)"
+                    f"{take_price:.2f} ({active_take_pct * 100:.1f}% down)"
                 )
                 logger.info("[TAKE PROFIT] SHORT %s: %s", ticker, reason)
                 trade_id = _close_position(

@@ -5,7 +5,14 @@ from datetime import datetime, timedelta
 import numpy as np
 import talib
 
-from config import data_client, StockBarsRequest, TimeFrame
+from config import (
+    CryptoBarsRequest,
+    StockBarsRequest,
+    TimeFrame,
+    crypto_data_client,
+    data_client,
+    is_crypto_symbol,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,27 +30,43 @@ def _fetch_bars(ticker: str) -> dict | None:
     Returns a dict with numpy arrays ``close``, ``high``, ``low``, ``volume``
     or ``None`` when data is unavailable / insufficient.
     """
-    if data_client is None:
+    symbol = ticker.strip().upper().replace("-", "/")
+    crypto = is_crypto_symbol(symbol)
+
+    if crypto and crypto_data_client is None:
+        return None
+    if not crypto and data_client is None:
         return None
     try:
         end = datetime.utcnow()
         start = end - timedelta(days=90)  # ~63 trading days
-        req = StockBarsRequest(
-            symbol_or_symbols=ticker,
-            timeframe=TimeFrame.Day,
-            start=start,
-            end=end,
-        )
-        bars = data_client.get_stock_bars(req)
+        if crypto:
+            if CryptoBarsRequest is None:
+                return None
+            req = CryptoBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=TimeFrame.Day,
+                start=start,
+                end=end,
+            )
+            bars = crypto_data_client.get_crypto_bars(req)
+        else:
+            req = StockBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=TimeFrame.Day,
+                start=start,
+                end=end,
+            )
+            bars = data_client.get_stock_bars(req)
         df = bars.df
         if hasattr(df.index, "levels"):
             lvl0 = df.index.get_level_values(0)
-            if ticker in lvl0:
-                df = df.xs(ticker, level=0)
+            if symbol in lvl0:
+                df = df.xs(symbol, level=0)
         if df.empty or len(df) < _MIN_BARS:
             logger.warning(
                 "Insufficient bars for %s (%d < %d). Technical signals will be NEUTRAL.",
-                ticker, len(df), _MIN_BARS,
+                symbol, len(df), _MIN_BARS,
             )
             return None
         return {
@@ -53,7 +76,7 @@ def _fetch_bars(ticker: str) -> dict | None:
             "volume": df["volume"].values.astype(float),
         }
     except Exception as exc:
-        logger.warning("OHLCV fetch failed for %s: %s. Returning NEUTRAL signals.", ticker, exc)
+        logger.warning("OHLCV fetch failed for %s: %s. Returning NEUTRAL signals.", symbol, exc)
         return None
 
 

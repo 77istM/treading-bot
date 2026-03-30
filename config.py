@@ -24,6 +24,14 @@ except ImportError:
     TimeFrame = None
     _has_data_client = False
 
+try:
+    from alpaca.data.historical.crypto import CryptoHistoricalDataClient
+    from alpaca.data.requests import CryptoBarsRequest, CryptoLatestTradeRequest
+except ImportError:
+    CryptoHistoricalDataClient = None
+    CryptoBarsRequest = None
+    CryptoLatestTradeRequest = None
+
 # --- Logging Setup ---
 _log_format = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 _handlers: list[logging.Handler] = [logging.StreamHandler()]
@@ -81,6 +89,12 @@ MAX_POSITION_PCT = _env_float("MAX_POSITION_PCT", 0.03) # Ring fence: <3% per tr
 STOP_LOSS_PCT = _env_float("STOP_LOSS_PCT", 0.03)       # Default 3% stop loss
 TAKE_PROFIT_PCT = _env_float("TAKE_PROFIT_PCT", 0.05)   # Default 5% take profit
 
+# Crypto-specific safety rails (stricter than equities by default)
+CRYPTO_MAX_POSITION_PCT = _env_float("CRYPTO_MAX_POSITION_PCT", 0.01)
+CRYPTO_STOP_LOSS_PCT = _env_float("CRYPTO_STOP_LOSS_PCT", 0.02)
+CRYPTO_TAKE_PROFIT_PCT = _env_float("CRYPTO_TAKE_PROFIT_PCT", 0.03)
+ALLOW_CRYPTO_SHORTS = _env_bool("ALLOW_CRYPTO_SHORTS", default=False)
+
 # --- Continuous Loop ---
 LOOP_INTERVAL_SECONDS = _env_int("LOOP_INTERVAL_SECONDS", 300)   # 5-min default cycle
 
@@ -109,6 +123,32 @@ else:
         "JPM", "BAC", "JNJ", "XOM", "WMT",
     ]
 
+_crypto_tickers_env = _vault.get("CRYPTO_TICKERS", "") or ""
+if _crypto_tickers_env.strip():
+    CRYPTO_TICKERS = [t.strip().upper() for t in _crypto_tickers_env.split(",") if t.strip()]
+else:
+    CRYPTO_TICKERS = ["BTC/USD", "ETH/USD"]
+
+
+def _normalize_crypto_symbol(symbol: str) -> str:
+    s = symbol.strip().upper().replace("-", "/")
+    if "/" in s:
+        return s
+    for quote in ("USDT", "USDC", "USD"):
+        if s.endswith(quote) and len(s) > len(quote):
+            base = s[: -len(quote)]
+            return f"{base}/{quote}"
+    return s
+
+
+def is_crypto_symbol(symbol: str) -> bool:
+    s = _normalize_crypto_symbol(symbol)
+    return any(s.endswith(f"/{quote}") for quote in ("USD", "USDT", "USDC"))
+
+
+# Final ticker universe = equities + configured crypto symbols
+TICKERS = TICKERS + [_normalize_crypto_symbol(t) for t in CRYPTO_TICKERS]
+
 # --- Portfolio Risk Limits ---
 MAX_DAILY_DRAWDOWN_PCT = _env_float("MAX_DAILY_DRAWDOWN_PCT", 0.05)   # Halt at -5% daily
 MAX_PORTFOLIO_HEAT_PCT = _env_float("MAX_PORTFOLIO_HEAT_PCT", 0.20)   # Max 20% open exposure
@@ -125,6 +165,11 @@ trading_client = (
 data_client = (
     StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET)
     if _has_data_client and ALPACA_API_KEY and ALPACA_SECRET
+    else None
+)
+crypto_data_client = (
+    CryptoHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET)
+    if _has_data_client and ALPACA_API_KEY and ALPACA_SECRET and CryptoHistoricalDataClient is not None
     else None
 )
 llm = OllamaLLM(
