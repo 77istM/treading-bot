@@ -43,18 +43,37 @@ MAX_POSITION_PCT = float(os.getenv("MAX_POSITION_PCT", "0.03")) # Ring fence: <3
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))       # Default 3% stop loss
 TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "0.05"))   # Default 5% take profit
 
+# --- Continuous Loop ---
+LOOP_INTERVAL_SECONDS = int(os.getenv("LOOP_INTERVAL_SECONDS", "300"))   # 5-min default cycle
+
+# --- Benchmark ETFs (US-listed proxies for global indices) ---
+# SPY=S&P500, EWU=FTSE100, EWJ=Nikkei225, EWQ=CAC40, EWG=DAX
+# Used by Phase 6 (Performance Attribution) to compute alpha vs. global indices.
+BENCHMARK_TICKERS = ["SPY", "EWU", "EWJ", "EWQ", "EWG"]
+
 # --- Ticker Universe ---
-# If TICKERS env var is set, use those; otherwise the bot selects from a broad universe.
+# ETFs (macro hedge vehicles) + core equities.
+# If TICKERS env var is set, use those; otherwise the bot selects from the curated universe.
 _tickers_env = os.getenv("TICKERS", "")
 if _tickers_env.strip():
     TICKERS = [t.strip().upper() for t in _tickers_env.split(",") if t.strip()]
 else:
+    # ETFs first (macro hedges), then quality equities
     TICKERS = [
-        "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "NVDA", "AMD",
-        "INTC", "CRM", "NFLX", "UBER", "JPM", "BAC", "GS", "WFC",
-        "JNJ", "PFE", "XOM", "CVX", "WMT", "TGT", "SPY", "QQQ",
-        "IWM", "COIN", "PLTR", "SOFI", "NIO", "RIVN",
+        # Broad-market & factor ETFs
+        "SPY", "QQQ", "IWM", "EFA", "EEM",
+        # Global index proxies (benchmarks also tradeable)
+        "EWU", "EWJ", "EWQ", "EWG",
+        # Sector ETFs
+        "XLF", "XLK", "XLE", "XLV", "GLD", "TLT",
+        # Core equities
+        "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA",
+        "JPM", "BAC", "JNJ", "XOM", "WMT",
     ]
+
+# --- Portfolio Risk Limits ---
+MAX_DAILY_DRAWDOWN_PCT = float(os.getenv("MAX_DAILY_DRAWDOWN_PCT", "0.05"))   # Halt at -5% daily
+MAX_PORTFOLIO_HEAT_PCT = float(os.getenv("MAX_PORTFOLIO_HEAT_PCT", "0.20"))   # Max 20% open exposure
 
 # Truncation limit for AI analysis text stored in the database.
 MAX_ANALYSIS_LENGTH = 2000

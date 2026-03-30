@@ -44,6 +44,12 @@ def init_db() -> sqlite3.Connection:
         ("fed_sentiment", "TEXT"),
         ("fear_level", "TEXT"),
         ("trade_analysis", "TEXT"),
+        # Phase 2 — Richer Signals
+        ("macd_signal", "TEXT"),
+        ("bbands_signal", "TEXT"),
+        ("volume_signal", "TEXT"),
+        ("earnings_flag", "TEXT"),
+        ("momentum_score", "REAL"),
     ]
     for col_name, col_type in new_columns:
         if col_name not in existing_columns:
@@ -55,5 +61,34 @@ def init_db() -> sqlite3.Connection:
             value TEXT,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"""
     )
+
+    # Reflections table — stores LLM-generated lessons after stop-losses and EOD reviews
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS reflections
+           (id INTEGER PRIMARY KEY,
+            reflection_type TEXT,
+            trade_id INTEGER,
+            ticker TEXT,
+            outcome TEXT,
+            pnl REAL,
+            lesson TEXT,
+            raw_analysis TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP)"""
+    )
+
+    # Risk snapshots — one row per trading cycle capturing portfolio health
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS risk_snapshots
+           (id INTEGER PRIMARY KEY,
+            portfolio_value REAL,
+            day_start_value REAL,
+            drawdown_pct REAL,
+            open_positions INTEGER,
+            total_heat_pct REAL,
+            trading_halted INTEGER DEFAULT 0,
+            halt_reason TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP)"""
+    )
+
     conn.commit()
     return conn

@@ -17,7 +17,10 @@ DEFAULT_TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "0.05"))
 
 st.set_page_config(page_title="Hedge Fund Trading Bot", layout="wide")
 st.title("🏦 Hedge Fund Trading Bot Dashboard")
-st.caption("Real-time trade telemetry with multi-signal AI analysis (sentiment · technicals · geopolitics · Fed rate · fear/VIX).")
+st.caption(
+    "Real-time trade telemetry · multi-signal AI analysis · "
+    "post-trade reflection · portfolio risk controller"
+)
 
 
 # --- Settings helpers (read/write via DB settings table) ---
@@ -107,6 +110,34 @@ def load_trades(db_path: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=10)
+def load_reflections(db_path: str) -> pd.DataFrame:
+    """Load the reflections table. Returns an empty DataFrame when unavailable."""
+    if not os.path.exists(db_path):
+        return pd.DataFrame()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            return pd.read_sql_query(
+                "SELECT * FROM reflections ORDER BY id DESC", conn
+            )
+    except sqlite3.Error:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=10)
+def load_risk_snapshots(db_path: str) -> pd.DataFrame:
+    """Load the risk_snapshots table. Returns an empty DataFrame when unavailable."""
+    if not os.path.exists(db_path):
+        return pd.DataFrame()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            return pd.read_sql_query(
+                "SELECT * FROM risk_snapshots ORDER BY id DESC LIMIT 200", conn
+            )
+    except sqlite3.Error:
+        return pd.DataFrame()
+
+
 def build_pnl_frame(trades: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     """Build cumulative PnL series from available columns, else a signed-exposure proxy."""
     frame = trades.copy()
@@ -184,13 +215,17 @@ st.subheader("📋 Trade History")
 desired_cols = [
     "trade_rowid", "created_at", "ticker", "side", "qty", "price",
     "stop_loss_price", "take_profit_price",
-    "sentiment", "technical_signal", "geopolitics", "fed_sentiment", "fear_level",
+    # Phase 1 signals
+    "sentiment", "geopolitics", "fed_sentiment", "fear_level",
+    # Phase 2 signals
+    "technical_signal", "macd_signal", "bbands_signal", "volume_signal",
+    "earnings_flag", "momentum_score",
     "realized_pnl", "reason",
 ]
 display_cols = [c for c in desired_cols if c in trades_df.columns]
 display_df = trades_df[display_cols].copy() if display_cols else trades_df.copy()
 
-for col in ("price", "stop_loss_price", "take_profit_price", "realized_pnl"):
+for col in ("price", "stop_loss_price", "take_profit_price", "realized_pnl", "momentum_score"):
     if col in display_df.columns:
         display_df[col] = pd.to_numeric(display_df[col], errors="coerce").round(4)
 
@@ -223,6 +258,76 @@ if "trade_analysis" in trades_df.columns:
 if st.button("🔄 Refresh"):
     st.cache_data.clear()
     st.rerun()
+
+# --- Post-Trade Reflections ---
+st.divider()
+st.subheader("🧠 Post-Trade Reflections & Lessons")
+reflections_df = load_reflections(DB_PATH)
+if reflections_df.empty:
+    st.info("No reflections recorded yet. They appear after stop-loss events and each market close.")
+else:
+    tab_stop, tab_eod, tab_all = st.tabs(["🔴 Stop-Loss Reflections", "🌙 End-of-Day Reviews", "📚 All Lessons"])
+
+    with tab_stop:
+        sl_df = reflections_df[reflections_df["reflection_type"] == "stop_loss"].head(20)
+        if sl_df.empty:
+            st.info("No stop-loss reflections yet.")
+        else:
+            for _, row in sl_df.iterrows():
+                label = (
+                    f"[{row.get('ticker', 'N/A')}]  {row.get('created_at', '')}  "
+                    f"PnL: ${float(row.get('pnl') or 0):.2f}"
+                )
+                with st.expander(label):
+                    st.markdown(f"**Lesson:** {row.get('lesson', '')}")
+                    st.text(row.get("raw_analysis", ""))
+
+    with tab_eod:
+        eod_df = reflections_df[reflections_df["reflection_type"] == "end_of_day"].head(10)
+        if eod_df.empty:
+            st.info("No end-of-day reflections yet. They run automatically after market close.")
+        else:
+            for _, row in eod_df.iterrows():
+                label = f"EOD Review — {row.get('created_at', '')}  PnL: ${float(row.get('pnl') or 0):.2f}"
+                with st.expander(label):
+                    st.markdown(f"**Summary:** {row.get('lesson', '')}")
+                    st.text(row.get("raw_analysis", ""))
+
+    with tab_all:
+        display_refl = reflections_df[["created_at", "reflection_type", "ticker",
+                                       "outcome", "pnl", "lesson"]].copy()
+        display_refl["pnl"] = pd.to_numeric(display_refl["pnl"], errors="coerce").round(2)
+        st.dataframe(display_refl, use_container_width=True)
+
+# --- Portfolio Risk Status ---
+st.divider()
+st.subheader("🛡️ Portfolio Risk Controller")
+risk_df = load_risk_snapshots(DB_PATH)
+if risk_df.empty:
+    st.info("No risk snapshots yet. They are recorded each trading cycle.")
+else:
+    latest = risk_df.iloc[0]
+    rc1, rc2, rc3, rc4 = st.columns(4)
+    rc1.metric("Portfolio Value", f"${float(latest.get('portfolio_value') or 0):,.0f}")
+    rc2.metric("Day-Start Value", f"${float(latest.get('day_start_value') or 0):,.0f}")
+    drawdown = float(latest.get('drawdown_pct') or 0)
+    rc3.metric("Daily Drawdown", f"{drawdown * 100:.2f}%", delta_color="inverse")
+    heat = float(latest.get('total_heat_pct') or 0)
+    rc4.metric("Portfolio Heat", f"{heat * 100:.1f}%")
+
+    halted = int(latest.get("trading_halted") or 0)
+    if halted:
+        st.error(f"⛔ Trading HALTED — {latest.get('halt_reason', '')}")
+    else:
+        st.success("✅ Trading ACTIVE — all risk limits within bounds.")
+
+    with st.expander("Risk Snapshot History"):
+        display_risk = risk_df[["created_at", "portfolio_value", "drawdown_pct",
+                                 "total_heat_pct", "open_positions",
+                                 "trading_halted", "halt_reason"]].copy()
+        for col in ("portfolio_value", "drawdown_pct", "total_heat_pct"):
+            display_risk[col] = pd.to_numeric(display_risk[col], errors="coerce").round(4)
+        st.dataframe(display_risk, use_container_width=True)
 
 st.caption("Last updated: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
