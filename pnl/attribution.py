@@ -172,6 +172,29 @@ def compute_signal_pnl_breakdown(closed_trades: pd.DataFrame) -> pd.DataFrame:
     return out.drop(columns=["abs_contribution"]).reset_index(drop=True)
 
 
+def compute_strategy_pnl_breakdown(closed_trades: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate realized PnL by strategy and market regime."""
+    if closed_trades.empty:
+        return pd.DataFrame()
+    if "strategy_name" not in closed_trades.columns:
+        return pd.DataFrame()
+
+    frame = closed_trades.copy()
+    frame["strategy_name"] = frame["strategy_name"].astype(str).fillna("unknown")
+    frame["strategy_regime"] = frame.get("strategy_regime", "UNKNOWN").astype(str)
+    frame["realized_pnl"] = pd.to_numeric(frame.get("realized_pnl"), errors="coerce").fillna(0.0)
+
+    grouped = (
+        frame.groupby(["strategy_name", "strategy_regime"], dropna=False)["realized_pnl"]
+        .agg(["count", "sum", "mean"])
+        .reset_index()
+        .rename(columns={"count": "trades", "sum": "total_pnl", "mean": "avg_pnl"})
+        .sort_values("total_pnl", ascending=False)
+        .reset_index(drop=True)
+    )
+    return grouped
+
+
 def benchmark_cumulative_returns(
     start_at: datetime | None = None,
     end_at: datetime | None = None,

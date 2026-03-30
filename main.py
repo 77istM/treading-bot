@@ -21,9 +21,10 @@ from signals.sentiment import analyze_sentiment
 from signals.technical import get_technical_signals
 from signals.earnings import get_earnings_flag
 from signals.macro import analyze_geopolitics, analyze_fed_rate, analyze_market_fear
-from trading.analysis import pre_trade_analysis, assess_risk
+from trading.analysis import assess_risk
 from trading.execution import execute_trade
 from trading.monitor import monitor_positions
+from trading.strategies import StrategyContext, StrategySelector, detect_market_regime
 from reflection.engine import (
     reflect_on_stop_loss,
     reflect_on_trade,
@@ -114,7 +115,15 @@ def _run_trading_cycle(conn, risk_ctrl: PortfolioRiskController) -> None:
     geopolitics = analyze_geopolitics()
     fed_rate = analyze_fed_rate()
     fear_level = analyze_market_fear()
-    logger.info("Geopolitics: %s | Fed Rate: %s | Market Fear: %s", geopolitics, fed_rate, fear_level)
+    regime = detect_market_regime()
+    selector = StrategySelector()
+    logger.info(
+        "Geopolitics: %s | Fed Rate: %s | Market Fear: %s | Regime: %s",
+        geopolitics,
+        fed_rate,
+        fear_level,
+        regime,
+    )
 
     # Step 5 — Per-ticker analysis and execution
     for ticker in TICKERS:
@@ -149,17 +158,44 @@ def _run_trading_cycle(conn, risk_ctrl: PortfolioRiskController) -> None:
             "fear_level": fear_level,
         }
 
-        direction, should_trade, reason, full_analysis = pre_trade_analysis(
-            ticker, sentiment, tech["summary"], geopolitics, fed_rate, fear_level,
-            stop_pct, take_pct, conn=conn,
-            rsi_signal=tech["rsi"],
-            macd_signal=tech["macd"],
-            bbands_signal=tech["bbands"],
-            volume_signal=tech["volume"],
-            earnings_flag=earnings,
-            momentum_score=tech["momentum_score"],
+        strategy_context = StrategyContext(
+            ticker=ticker,
+            sentiment=sentiment,
+            technical=tech["summary"],
+            rsi=tech["rsi"],
+            macd=tech["macd"],
+            bbands=tech["bbands"],
+            volume=tech["volume"],
+            momentum_score=float(tech["momentum_score"]),
+            earnings=earnings,
+            geopolitics=geopolitics,
+            fed_rate=fed_rate,
+            fear_level=fear_level,
         )
-        logger.info("  AI Decision: %s | Trade: %s | %s", direction, should_trade, reason)
+        strategy_decision = selector.choose(strategy_context, regime)
+        strategy_name = strategy_decision.strategy_name
+        strategy_regime = strategy_decision.regime
+        direction = strategy_decision.direction
+        should_trade = strategy_decision.should_trade
+        reason = strategy_decision.reason
+        full_analysis = (
+            f"STRATEGY: {strategy_name}\n"
+            f"REGIME: {strategy_regime}\n"
+            f"CONFIDENCE: {strategy_decision.confidence}\n"
+            f"DECISION: {direction} | TRADE={should_trade}\n"
+            f"REASON: {reason}"
+        )
+        signals["strategy_name"] = strategy_name
+        signals["strategy_regime"] = strategy_regime
+
+        logger.info(
+            "  Strategy Decision: %s | Regime: %s | Dir: %s | Trade: %s | %s",
+            strategy_name,
+            strategy_regime,
+            direction,
+            should_trade,
+            reason,
+        )
 
         trade_ok, final_direction, final_reason = assess_risk(
             daily_count, direction, should_trade, reason
@@ -167,7 +203,16 @@ def _run_trading_cycle(conn, risk_ctrl: PortfolioRiskController) -> None:
 
         if trade_ok:
             trade_id = execute_trade(
-                conn, ticker, final_direction, final_reason, full_analysis, signals, stop_pct, take_pct
+                conn,
+                ticker,
+                final_direction,
+                final_reason,
+                full_analysis,
+                signals,
+                stop_pct,
+                take_pct,
+                strategy_name=strategy_name,
+                strategy_regime=strategy_regime,
             )
             # Post-trade reflection: commit a 24h prediction using the actual fill price
             entry_price = 0.0

@@ -66,13 +66,15 @@ def get_latest_signal_snapshot(conn: sqlite3.Connection, ticker: str) -> dict:
         "volume": "NORMAL",
         "earnings": "UNKNOWN",
         "momentum_score": 0.0,
+        "strategy_name": "unknown",
+        "strategy_regime": "UNKNOWN",
     }
 
     try:
         row = conn.execute(
             """SELECT sentiment, technical_signal, geopolitics, fed_sentiment, fear_level,
                       rsi_signal, macd_signal, bbands_signal, volume_signal,
-                      earnings_flag, momentum_score
+                     earnings_flag, momentum_score, strategy_name, strategy_regime
                FROM trades
                WHERE ticker = ?
                ORDER BY id DESC
@@ -94,6 +96,8 @@ def get_latest_signal_snapshot(conn: sqlite3.Connection, ticker: str) -> dict:
             "volume": row[8] or defaults["volume"],
             "earnings": row[9] or defaults["earnings"],
             "momentum_score": float(row[10] or defaults["momentum_score"]),
+            "strategy_name": row[11] or defaults["strategy_name"],
+            "strategy_regime": row[12] or defaults["strategy_regime"],
         }
     except Exception as exc:
         logger.warning("Failed to get latest signal snapshot for %s: %s", ticker, exc)
