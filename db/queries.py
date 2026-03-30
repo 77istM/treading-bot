@@ -46,3 +46,59 @@ def get_daily_trade_count(conn: sqlite3.Connection) -> int:
     )
     row = cursor.fetchone()
     return row[0] if row else 0
+
+
+def get_latest_signal_snapshot(conn: sqlite3.Connection, ticker: str) -> dict:
+    """Return the most recent signal snapshot recorded for *ticker*.
+
+    This is used to carry signal context onto position-closing rows so
+    realized PnL can be attributed by signal quality.
+    """
+    defaults = {
+        "sentiment": "NEUTRAL",
+        "technical": "NEUTRAL",
+        "geopolitics": "MEDIUM_RISK",
+        "fed_rate": "NEUTRAL",
+        "fear_level": "MEDIUM",
+        "rsi": "NEUTRAL",
+        "macd": "NEUTRAL",
+        "bbands": "NEUTRAL",
+        "volume": "NORMAL",
+        "earnings": "UNKNOWN",
+        "momentum_score": 0.0,
+        "strategy_name": "unknown",
+        "strategy_regime": "UNKNOWN",
+    }
+
+    try:
+        row = conn.execute(
+            """SELECT sentiment, technical_signal, geopolitics, fed_sentiment, fear_level,
+                      rsi_signal, macd_signal, bbands_signal, volume_signal,
+                     earnings_flag, momentum_score, strategy_name, strategy_regime
+               FROM trades
+               WHERE ticker = ?
+               ORDER BY id DESC
+               LIMIT 1""",
+            (ticker,),
+        ).fetchone()
+        if not row:
+            return defaults
+
+        return {
+            "sentiment": row[0] or defaults["sentiment"],
+            "technical": row[1] or defaults["technical"],
+            "geopolitics": row[2] or defaults["geopolitics"],
+            "fed_rate": row[3] or defaults["fed_rate"],
+            "fear_level": row[4] or defaults["fear_level"],
+            "rsi": row[5] or defaults["rsi"],
+            "macd": row[6] or defaults["macd"],
+            "bbands": row[7] or defaults["bbands"],
+            "volume": row[8] or defaults["volume"],
+            "earnings": row[9] or defaults["earnings"],
+            "momentum_score": float(row[10] or defaults["momentum_score"]),
+            "strategy_name": row[11] or defaults["strategy_name"],
+            "strategy_regime": row[12] or defaults["strategy_regime"],
+        }
+    except Exception as exc:
+        logger.warning("Failed to get latest signal snapshot for %s: %s", ticker, exc)
+        return defaults

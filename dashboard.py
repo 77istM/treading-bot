@@ -7,6 +7,14 @@ import pandas as pd
 import streamlit as st
 
 from db.queries import read_setting as _db_read_setting, write_setting as _db_write_setting
+from pnl.attribution import (
+    benchmark_cumulative_returns,
+    build_closed_trades_frame,
+    compute_core_metrics,
+    compute_signal_accuracy,
+    compute_signal_pnl_breakdown,
+    compute_strategy_pnl_breakdown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +182,8 @@ else:
     trades_df = trades_df.reset_index(drop=True)
 
 pnl_df, pnl_label = build_pnl_frame(trades_df)
+closed_trades_df = build_closed_trades_frame(trades_df)
+core_metrics = compute_core_metrics(closed_trades_df)
 
 # --- Metrics ---
 total_trades = len(trades_df)
@@ -204,28 +214,143 @@ col4.metric("Net Position", long_trades - short_trades)
 col5.metric(f"Today ({date.today().isoformat()})", f"{daily_trades} / {DAILY_MAX_TRADES}")
 col6.metric("Realized PnL", f"${net_pnl:,.2f}")
 
+st.subheader("🎯 Phase 6 Performance Attribution")
+p1, p2, p3, p4 = st.columns(4)
+p1.metric("Closed Trades", int(core_metrics["closed_trades"]))
+p2.metric("Win Rate", f"{core_metrics['win_rate'] * 100:.1f}%")
+p3.metric("Sharpe (trade-level)", f"{core_metrics['sharpe']:.2f}")
+p4.metric("Max Drawdown", f"${core_metrics['max_drawdown']:,.2f}")
+
 # --- PnL Curve ---
 st.subheader("📈 PnL Curve")
 idx_col = "trade_rowid" if "trade_rowid" in pnl_df.columns else pnl_df.index
 st.line_chart(pnl_df.set_index(idx_col)["cumulative_pnl"])
 st.caption(pnl_label)
 
+# --- Benchmark Comparison ---
+st.subheader("🌍 Benchmark Comparison")
+if "created_at" in closed_trades_df.columns and not closed_trades_df.empty:
+    local_closed = closed_trades_df.copy()
+    local_closed["created_at"] = pd.to_datetime(local_closed["created_at"], errors="coerce")
+    local_closed = local_closed.dropna(subset=["created_at"])
+
+    qty = pd.to_numeric(local_closed.get("qty"), errors="coerce").fillna(0.0).abs()
+    entry_px = pd.to_numeric(local_closed.get("entry_reference_price"), errors="coerce")
+    fallback_px = pd.to_numeric(local_closed.get("price"), errors="coerce")
+    notionals = (qty * entry_px.fillna(fallback_px)).replace(0, pd.NA)
+    local_closed["trade_return"] = (
+        pd.to_numeric(local_closed.get("realized_pnl"), errors="coerce").fillna(0.0) / notionals
+    ).fillna(0.0)
+    local_closed["trade_day"] = local_closed["created_at"].dt.date
+    bot_daily_returns = local_closed.groupby("trade_day")["trade_return"].mean().sort_index()
+
+    if not bot_daily_returns.empty:
+        bot_cum = (1.0 + bot_daily_returns).cumprod() - 1.0
+        start_ts = pd.Timestamp(bot_daily_returns.index.min()).to_pydatetime()
+        end_ts = pd.Timestamp(bot_daily_returns.index.max()).to_pydatetime()
+        bench = benchmark_cumulative_returns(start_ts, end_ts)
+
+        comparison = pd.DataFrame({"BOT": bot_cum.values}, index=pd.to_datetime(bot_cum.index))
+        if not bench.empty:
+            comparison = comparison.join(bench, how="outer").sort_index().ffill().fillna(0.0)
+
+        st.line_chart(comparison)
+
+        if not bench.empty:
+            bot_final = float(comparison["BOT"].iloc[-1])
+            alpha_rows = []
+            for col in bench.columns:
+                bm_final = float(comparison[col].iloc[-1])
+                alpha_rows.append(
+                    {
+                        "benchmark": col,
+                        "benchmark_return": bm_final,
+                        "bot_return": bot_final,
+                        "alpha": bot_final - bm_final,
+                    }
+                )
+            alpha_df = pd.DataFrame(alpha_rows)
+            alpha_df["benchmark_return"] = (alpha_df["benchmark_return"] * 100).round(2)
+            alpha_df["bot_return"] = (alpha_df["bot_return"] * 100).round(2)
+            alpha_df["alpha"] = (alpha_df["alpha"] * 100).round(2)
+            st.dataframe(alpha_df, use_container_width=True)
+        else:
+            st.info("Benchmark data unavailable. Ensure Alpaca data credentials are configured.")
+    else:
+        st.info("Not enough closed-trade return data yet for benchmark comparison.")
+else:
+    st.info("No closed trades with timestamps available yet for benchmark comparison.")
+
+# --- Signal Accuracy Scoreboard ---
+st.subheader("✅ Signal Accuracy Scoreboard")
+accuracy_df = compute_signal_accuracy(closed_trades_df)
+if accuracy_df.empty:
+    st.info("No directional signal outcomes yet. Accuracy appears after closing trades with price-move data.")
+else:
+    show_acc = accuracy_df.copy()
+    show_acc["accuracy"] = (show_acc["accuracy"] * 100).round(2)
+    st.dataframe(show_acc, use_container_width=True)
+
+# --- Per-Strategy PnL ---
+st.subheader("🧠 Per-Strategy PnL")
+strategy_pnl_df = compute_strategy_pnl_breakdown(closed_trades_df)
+if strategy_pnl_df.empty:
+    st.info("No strategy-attributed closed trades yet.")
+else:
+    show_strategy = strategy_pnl_df.copy()
+    show_strategy["total_pnl"] = pd.to_numeric(show_strategy["total_pnl"], errors="coerce").round(2)
+    show_strategy["avg_pnl"] = pd.to_numeric(show_strategy["avg_pnl"], errors="coerce").round(2)
+    st.dataframe(show_strategy, use_container_width=True)
+
+    strategy_series = (
+        show_strategy.groupby("strategy_name", dropna=False)["total_pnl"]
+        .sum()
+        .sort_values(ascending=False)
+    )
+    st.bar_chart(strategy_series)
+
+# --- Per-Signal PnL Contribution ---
+st.subheader("🧩 Per-Signal PnL Contribution")
+signal_pnl_df = compute_signal_pnl_breakdown(closed_trades_df)
+if signal_pnl_df.empty:
+    st.info("No attributable closed trades yet.")
+else:
+    signal_filter = st.selectbox(
+        "Signal Family",
+        options=["ALL"] + sorted(signal_pnl_df["signal"].dropna().unique().tolist()),
+        index=0,
+    )
+    table_df = signal_pnl_df.copy()
+    if signal_filter != "ALL":
+        table_df = table_df[table_df["signal"] == signal_filter]
+
+    for col in ("total_pnl", "avg_pnl"):
+        table_df[col] = pd.to_numeric(table_df[col], errors="coerce").round(2)
+
+    st.dataframe(table_df, use_container_width=True)
+
 # --- Trade History ---
 st.subheader("📋 Trade History")
 desired_cols = [
     "trade_rowid", "created_at", "ticker", "side", "qty", "price",
     "stop_loss_price", "take_profit_price",
+    "strategy_name", "strategy_regime",
     # Phase 1 signals
     "sentiment", "geopolitics", "fed_sentiment", "fear_level",
     # Phase 2 signals
-    "technical_signal", "macd_signal", "bbands_signal", "volume_signal",
+    "technical_signal", "rsi_signal", "macd_signal", "bbands_signal", "volume_signal",
     "earnings_flag", "momentum_score",
+    # Phase 6 attribution fields
+    "is_closing_trade", "entry_reference_price", "price_move_pct",
     "realized_pnl", "reason",
 ]
 display_cols = [c for c in desired_cols if c in trades_df.columns]
 display_df = trades_df[display_cols].copy() if display_cols else trades_df.copy()
 
-for col in ("price", "stop_loss_price", "take_profit_price", "realized_pnl", "momentum_score"):
+for col in (
+    "price", "stop_loss_price", "take_profit_price", "entry_reference_price",
+    "price_move_pct", "realized_pnl", "momentum_score",
+):
     if col in display_df.columns:
         display_df[col] = pd.to_numeric(display_df[col], errors="coerce").round(4)
 

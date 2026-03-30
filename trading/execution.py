@@ -5,6 +5,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
 
 from config import trading_client, MAX_ANALYSIS_LENGTH
+from db.queries import get_latest_signal_snapshot
 from pnl.calculator import calculate_realized_pnl
 from trading.sizing import get_current_price, get_portfolio_value, calculate_position_size
 
@@ -20,6 +21,8 @@ def execute_trade(
     signals: dict,
     stop_pct: float,
     take_pct: float,
+    strategy_name: str = "unknown",
+    strategy_regime: str = "UNKNOWN",
 ) -> int | None:
     """Submit a market order (long or short) with ring-fence position sizing.
 
@@ -93,17 +96,20 @@ def execute_trade(
     cursor.execute(
         """INSERT INTO trades
            (ticker, side, qty, price, stop_loss_price, take_profit_price,
+            strategy_name, strategy_regime,
             sentiment, technical_signal, geopolitics, fed_sentiment, fear_level,
-            macd_signal, bbands_signal, volume_signal, earnings_flag, momentum_score,
+            rsi_signal, macd_signal, bbands_signal, volume_signal, earnings_flag, momentum_score,
             trade_analysis, realized_pnl, reason)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             ticker, direction, float(qty), filled_price, stop_price, take_price,
+            strategy_name, strategy_regime,
             signals.get("sentiment", "NEUTRAL"),
             signals.get("technical", "NEUTRAL"),
             signals.get("geopolitics", "MEDIUM_RISK"),
             signals.get("fed_rate", "NEUTRAL"),
             signals.get("fear_level", "MEDIUM"),
+            signals.get("rsi", "NEUTRAL"),
             signals.get("macd", "NEUTRAL"),
             signals.get("bbands", "NEUTRAL"),
             signals.get("volume", "NORMAL"),
@@ -124,6 +130,8 @@ def _close_position(
     close_side: str,
     current_price: float,
     reason: str,
+    signal_snapshot: dict | None = None,
+    entry_reference_price: float | None = None,
 ) -> int | None:
     """Submit a closing market order, log it, and return the new trade row id."""
     side = OrderSide.BUY if close_side == "BUY" else OrderSide.SELL
@@ -147,11 +155,37 @@ def _close_position(
             filled_price = current_price
 
         realized_pnl = calculate_realized_pnl(conn, ticker, close_side, qty, filled_price)
+        signal_data = signal_snapshot or get_latest_signal_snapshot(conn, ticker)
+        price_move_pct = None
+        if entry_reference_price and entry_reference_price > 0 and filled_price is not None:
+            price_move_pct = (filled_price - entry_reference_price) / entry_reference_price
 
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO trades (ticker, side, qty, price, realized_pnl, reason) VALUES (?, ?, ?, ?, ?, ?)",
-            (ticker, close_side, qty, filled_price, realized_pnl, reason),
+            """INSERT INTO trades
+               (ticker, side, qty, price, realized_pnl, reason,
+                is_closing_trade, entry_reference_price, price_move_pct,
+                strategy_name, strategy_regime,
+                sentiment, technical_signal, geopolitics, fed_sentiment, fear_level,
+                rsi_signal, macd_signal, bbands_signal, volume_signal, earnings_flag, momentum_score)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                ticker, close_side, qty, filled_price, realized_pnl, reason,
+                1, entry_reference_price, price_move_pct,
+                signal_data.get("strategy_name", "unknown"),
+                signal_data.get("strategy_regime", "UNKNOWN"),
+                signal_data.get("sentiment", "NEUTRAL"),
+                signal_data.get("technical", "NEUTRAL"),
+                signal_data.get("geopolitics", "MEDIUM_RISK"),
+                signal_data.get("fed_rate", "NEUTRAL"),
+                signal_data.get("fear_level", "MEDIUM"),
+                signal_data.get("rsi", "NEUTRAL"),
+                signal_data.get("macd", "NEUTRAL"),
+                signal_data.get("bbands", "NEUTRAL"),
+                signal_data.get("volume", "NORMAL"),
+                signal_data.get("earnings", "UNKNOWN"),
+                signal_data.get("momentum_score", 0.0),
+            ),
         )
         conn.commit()
         trade_id = cursor.lastrowid
