@@ -13,6 +13,7 @@ from pnl.attribution import (
     compute_core_metrics,
     compute_signal_accuracy,
     compute_signal_pnl_breakdown,
+    compute_strategy_pnl_breakdown,
 )
 
 logger = logging.getLogger(__name__)
@@ -290,6 +291,24 @@ else:
     show_acc["accuracy"] = (show_acc["accuracy"] * 100).round(2)
     st.dataframe(show_acc, use_container_width=True)
 
+# --- Per-Strategy PnL ---
+st.subheader("🧠 Per-Strategy PnL")
+strategy_pnl_df = compute_strategy_pnl_breakdown(closed_trades_df)
+if strategy_pnl_df.empty:
+    st.info("No strategy-attributed closed trades yet.")
+else:
+    show_strategy = strategy_pnl_df.copy()
+    show_strategy["total_pnl"] = pd.to_numeric(show_strategy["total_pnl"], errors="coerce").round(2)
+    show_strategy["avg_pnl"] = pd.to_numeric(show_strategy["avg_pnl"], errors="coerce").round(2)
+    st.dataframe(show_strategy, use_container_width=True)
+
+    strategy_series = (
+        show_strategy.groupby("strategy_name", dropna=False)["total_pnl"]
+        .sum()
+        .sort_values(ascending=False)
+    )
+    st.bar_chart(strategy_series)
+
 # --- Per-Signal PnL Contribution ---
 st.subheader("🧩 Per-Signal PnL Contribution")
 signal_pnl_df = compute_signal_pnl_breakdown(closed_trades_df)
@@ -315,6 +334,7 @@ st.subheader("📋 Trade History")
 desired_cols = [
     "trade_rowid", "created_at", "ticker", "side", "qty", "price",
     "stop_loss_price", "take_profit_price",
+    "strategy_name", "strategy_regime",
     # Phase 1 signals
     "sentiment", "geopolitics", "fed_sentiment", "fear_level",
     # Phase 2 signals

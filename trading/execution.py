@@ -21,6 +21,8 @@ def execute_trade(
     signals: dict,
     stop_pct: float,
     take_pct: float,
+    strategy_name: str = "unknown",
+    strategy_regime: str = "UNKNOWN",
 ) -> int | None:
     """Submit a market order (long or short) with ring-fence position sizing.
 
@@ -94,12 +96,14 @@ def execute_trade(
     cursor.execute(
         """INSERT INTO trades
            (ticker, side, qty, price, stop_loss_price, take_profit_price,
+            strategy_name, strategy_regime,
             sentiment, technical_signal, geopolitics, fed_sentiment, fear_level,
             rsi_signal, macd_signal, bbands_signal, volume_signal, earnings_flag, momentum_score,
             trade_analysis, realized_pnl, reason)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             ticker, direction, float(qty), filled_price, stop_price, take_price,
+            strategy_name, strategy_regime,
             signals.get("sentiment", "NEUTRAL"),
             signals.get("technical", "NEUTRAL"),
             signals.get("geopolitics", "MEDIUM_RISK"),
@@ -161,12 +165,15 @@ def _close_position(
             """INSERT INTO trades
                (ticker, side, qty, price, realized_pnl, reason,
                 is_closing_trade, entry_reference_price, price_move_pct,
+                strategy_name, strategy_regime,
                 sentiment, technical_signal, geopolitics, fed_sentiment, fear_level,
                 rsi_signal, macd_signal, bbands_signal, volume_signal, earnings_flag, momentum_score)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 ticker, close_side, qty, filled_price, realized_pnl, reason,
                 1, entry_reference_price, price_move_pct,
+                signal_data.get("strategy_name", "unknown"),
+                signal_data.get("strategy_regime", "UNKNOWN"),
                 signal_data.get("sentiment", "NEUTRAL"),
                 signal_data.get("technical", "NEUTRAL"),
                 signal_data.get("geopolitics", "MEDIUM_RISK"),
