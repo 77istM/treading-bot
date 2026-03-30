@@ -1,10 +1,25 @@
 services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
   bot:
     build: .
     container_name: trading_bot
-    network_mode: "host"
     env_file:
       - .env
+    depends_on:
+      ollama:
+        condition: service_healthy
     volumes:
       - .:/app
 
@@ -14,5 +29,13 @@ services:
     command: ["streamlit", "run", "dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
     ports:
       - "8501:8501"
+    env_file:
+      - .env
+    depends_on:
+      ollama:
+        condition: service_healthy
     volumes:
       - .:/app
+
+volumes:
+  ollama_data:

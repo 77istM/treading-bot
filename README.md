@@ -2,6 +2,37 @@
 
 ## 📊 Implementation Status
 
+## Ollama + Qwen Runtime (Codespaces)
+
+The bot is configured to use Ollama with Qwen by default:
+
+- `OLLAMA_MODEL=qwen2.5:7b-instruct`
+- `OLLAMA_BASE_URL=http://ollama:11434`
+- `SKIP_OLLAMA_HEALTHCHECK=false`
+
+`docker-compose.yml` includes an `ollama` service and wires `bot`/`dashboard`
+to wait for it.
+
+First-time model pull:
+
+```bash
+docker compose up -d ollama
+docker exec -it ollama ollama pull qwen2.5:7b-instruct
+```
+
+Run the app stack:
+
+```bash
+docker compose up --build bot dashboard
+```
+
+Optional fast fallback model for lower CPU/RAM environments:
+
+```bash
+docker exec -it ollama ollama pull qwen2.5:3b-instruct
+# then set OLLAMA_MODEL=qwen2.5:3b-instruct in .env
+```
+
 ## Crypto Trading Support
 
 The bot can now trade crypto symbols on Alpaca paper trading so you can test outside stock market hours.
