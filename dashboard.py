@@ -276,6 +276,8 @@ if "created_at" in closed_trades_df.columns and not closed_trades_df.empty:
             alpha_df["bot_return"] = (alpha_df["bot_return"] * 100).round(2)
             alpha_df["alpha"] = (alpha_df["alpha"] * 100).round(2)
             st.dataframe(alpha_df, use_container_width=True)
+            st.caption("Alpha vs Benchmark (%)")
+            st.bar_chart(alpha_df.set_index("benchmark")[["alpha"]])
         else:
             st.info("Benchmark data unavailable. Ensure Alpaca data credentials are configured.")
     else:
@@ -292,6 +294,12 @@ else:
     show_acc = accuracy_df.copy()
     show_acc["accuracy"] = (show_acc["accuracy"] * 100).round(2)
     st.dataframe(show_acc, use_container_width=True)
+    accuracy_chart = (
+        show_acc[["signal", "accuracy"]]
+        .set_index("signal")
+        .sort_values("accuracy", ascending=False)
+    )
+    st.bar_chart(accuracy_chart)
 
 # --- Signal Win/Loss Attribution ---
 st.subheader("⚖️ Signal Win/Loss Attribution")
@@ -312,6 +320,17 @@ else:
         show_outcomes[col] = pd.to_numeric(show_outcomes[col], errors="coerce").round(2)
     st.dataframe(show_outcomes, use_container_width=True)
 
+    if not show_outcomes.empty:
+        outcome_charts = show_outcomes[["signal_state", "win_rate", "total_pnl"]].copy()
+        outcome_charts["signal_state"] = outcome_charts["signal_state"].astype(str)
+        oc1, oc2 = st.columns(2)
+        with oc1:
+            st.caption("Win Rate by Signal State (%)")
+            st.bar_chart(outcome_charts.set_index("signal_state")[["win_rate"]])
+        with oc2:
+            st.caption("Total PnL by Signal State ($)")
+            st.bar_chart(outcome_charts.set_index("signal_state")[["total_pnl"]])
+
 # --- Per-Strategy PnL ---
 st.subheader("🧠 Per-Strategy PnL")
 strategy_pnl_df = compute_strategy_pnl_breakdown(closed_trades_df)
@@ -329,6 +348,20 @@ else:
         .sort_values(ascending=False)
     )
     st.bar_chart(strategy_series)
+
+    strategy_regime = (
+        show_strategy.pivot_table(
+            index="strategy_name",
+            columns="strategy_regime",
+            values="total_pnl",
+            aggfunc="sum",
+            fill_value=0.0,
+        )
+        .sort_index()
+    )
+    if not strategy_regime.empty:
+        st.caption("Strategy PnL by Regime")
+        st.bar_chart(strategy_regime)
 
 # --- Per-Signal PnL Contribution ---
 st.subheader("🧩 Per-Signal PnL Contribution")
@@ -349,6 +382,16 @@ else:
         table_df[col] = pd.to_numeric(table_df[col], errors="coerce").round(2)
 
     st.dataframe(table_df, use_container_width=True)
+
+    if not table_df.empty:
+        contribution_chart = (
+            table_df[["signal_state", "total_pnl"]]
+            .copy()
+            .set_index("signal_state")
+            .sort_values("total_pnl", ascending=False)
+        )
+        st.caption("Signal-State PnL Contribution ($)")
+        st.bar_chart(contribution_chart)
 
 # --- Trade History ---
 st.subheader("📋 Trade History")

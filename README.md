@@ -10,7 +10,7 @@
 | **Phase 4** | Post-Trade Reflection | ✅ **Done** | Stop-loss real-time reflection, EOD review, lesson injection |
 | **Phase 5** | Multi-Strategy | ✅ **Done** | Regime-based strategy selector with momentum, mean-reversion, and pairs trading |
 | **Phase 6** | Performance Attribution | ✅ **Done** | Signal accuracy tracking, Sharpe, drawdown, alpha vs benchmark |
-| **Phase 7** | Dashboard | ✅ Partial | Reflections viewer + risk status; needs attribution charts |
+| **Phase 7** | Dashboard | ✅ **Done** | Reflections viewer, risk status, and attribution charts |
 | **Phase 8** | Hardening | 🔲 Backlog | Tests, CI/CD, secrets vault, alert notifications |
 
 
