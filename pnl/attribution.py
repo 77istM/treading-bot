@@ -21,6 +21,15 @@ _SIGNAL_COLUMNS = [
     "fear_level",
 ]
 
+_DIRECTIONAL_SIGNAL_SPECS = {
+    "sentiment": {"BULLISH": 1, "BEARISH": -1},
+    "technical_signal": {"BULLISH": 1, "BEARISH": -1},
+    "rsi_signal": {"BULLISH": 1, "BEARISH": -1},
+    "macd_signal": {"BULLISH": 1, "BEARISH": -1},
+    "bbands_signal": {"BULLISH": 1, "BEARISH": -1},
+    "volume_signal": {"SPIKE_UP": 1, "SPIKE_DOWN": -1},
+}
+
 
 def build_closed_trades_frame(trades: pd.DataFrame) -> pd.DataFrame:
     """Return trades representing realized outcomes (closed positions)."""
@@ -62,6 +71,7 @@ def compute_core_metrics(closed_trades: pd.DataFrame) -> dict:
             "win_rate": 0.0,
             "sharpe": 0.0,
             "max_drawdown": 0.0,
+            "max_drawdown_pct": 0.0,
             "net_realized_pnl": 0.0,
         }
 
@@ -81,6 +91,14 @@ def compute_core_metrics(closed_trades: pd.DataFrame) -> dict:
     drawdowns = equity_curve - rolling_peak
     max_drawdown = float(drawdowns.min()) if not drawdowns.empty else 0.0
 
+    cumulative_returns = (1.0 + returns).cumprod() if not returns.empty else pd.Series(dtype=float)
+    if cumulative_returns.empty:
+        max_drawdown_pct = 0.0
+    else:
+        peak = cumulative_returns.cummax()
+        dd_pct = (cumulative_returns / peak) - 1.0
+        max_drawdown_pct = float(dd_pct.min()) if not dd_pct.empty else 0.0
+
     return {
         "closed_trades": total,
         "wins": wins,
@@ -88,12 +106,13 @@ def compute_core_metrics(closed_trades: pd.DataFrame) -> dict:
         "win_rate": (wins / total) if total else 0.0,
         "sharpe": sharpe,
         "max_drawdown": max_drawdown,
+        "max_drawdown_pct": max_drawdown_pct,
         "net_realized_pnl": float(pnl.sum()),
     }
 
 
 def compute_signal_accuracy(closed_trades: pd.DataFrame) -> pd.DataFrame:
-    """Compute directional accuracy for RSI/MACD-style categorical signals."""
+    """Compute directional accuracy for all directional categorical signals."""
     if closed_trades.empty:
         return pd.DataFrame()
 
@@ -104,15 +123,8 @@ def compute_signal_accuracy(closed_trades: pd.DataFrame) -> pd.DataFrame:
     move = pd.to_numeric(frame["price_move_pct"], errors="coerce")
     actual = np.sign(move)
 
-    specs = {
-        "rsi_signal": {"BULLISH": 1, "BEARISH": -1},
-        "macd_signal": {"BULLISH": 1, "BEARISH": -1},
-        "bbands_signal": {"BULLISH": 1, "BEARISH": -1},
-        "volume_signal": {"SPIKE_UP": 1, "SPIKE_DOWN": -1},
-    }
-
     rows = []
-    for col, direction_map in specs.items():
+    for col, direction_map in _DIRECTIONAL_SIGNAL_SPECS.items():
         if col not in frame.columns:
             continue
         signal = frame[col].astype(str).str.upper()
@@ -133,6 +145,50 @@ def compute_signal_accuracy(closed_trades: pd.DataFrame) -> pd.DataFrame:
         )
 
     return pd.DataFrame(rows).sort_values("accuracy", ascending=False).reset_index(drop=True)
+
+
+def compute_signal_outcome_breakdown(closed_trades: pd.DataFrame) -> pd.DataFrame:
+    """Break down win/loss attribution by signal family and signal state."""
+    if closed_trades.empty:
+        return pd.DataFrame()
+
+    frame = closed_trades.copy()
+    frame["realized_pnl"] = pd.to_numeric(frame.get("realized_pnl"), errors="coerce").fillna(0.0)
+
+    parts = []
+    for signal_col in _SIGNAL_COLUMNS:
+        if signal_col not in frame.columns:
+            continue
+
+        local = frame[[signal_col, "realized_pnl"]].copy()
+        local["signal_state"] = local[signal_col].astype(str).str.upper().replace("", "UNKNOWN")
+        local["signal"] = signal_col
+        local["wins"] = (local["realized_pnl"] > 0).astype(int)
+        local["losses"] = (local["realized_pnl"] < 0).astype(int)
+        local["flat"] = (local["realized_pnl"] == 0).astype(int)
+
+        grouped = (
+            local.groupby(["signal", "signal_state"], dropna=False)
+            .agg(
+                trades=("realized_pnl", "count"),
+                wins=("wins", "sum"),
+                losses=("losses", "sum"),
+                flat=("flat", "sum"),
+                total_pnl=("realized_pnl", "sum"),
+                avg_pnl=("realized_pnl", "mean"),
+            )
+            .reset_index()
+        )
+        grouped["win_rate"] = grouped["wins"] / grouped["trades"].replace(0, np.nan)
+        grouped["win_rate"] = grouped["win_rate"].fillna(0.0)
+        parts.append(grouped)
+
+    if not parts:
+        return pd.DataFrame()
+
+    out = pd.concat(parts, ignore_index=True)
+    out = out.sort_values(["signal", "total_pnl"], ascending=[True, False]).reset_index(drop=True)
+    return out
 
 
 def compute_signal_pnl_breakdown(closed_trades: pd.DataFrame) -> pd.DataFrame:
@@ -232,6 +288,7 @@ def benchmark_cumulative_returns(
         else:
             closes = pd.DataFrame({benchmarks[0]: df["close"]})
 
+        closes = closes.reindex(columns=benchmarks)
         closes = closes.dropna(how="all")
         if closes.empty:
             return pd.DataFrame()

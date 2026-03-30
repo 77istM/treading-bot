@@ -12,6 +12,7 @@ from pnl.attribution import (
     build_closed_trades_frame,
     compute_core_metrics,
     compute_signal_accuracy,
+    compute_signal_outcome_breakdown,
     compute_signal_pnl_breakdown,
     compute_strategy_pnl_breakdown,
 )
@@ -219,7 +220,8 @@ p1, p2, p3, p4 = st.columns(4)
 p1.metric("Closed Trades", int(core_metrics["closed_trades"]))
 p2.metric("Win Rate", f"{core_metrics['win_rate'] * 100:.1f}%")
 p3.metric("Sharpe (trade-level)", f"{core_metrics['sharpe']:.2f}")
-p4.metric("Max Drawdown", f"${core_metrics['max_drawdown']:,.2f}")
+p4.metric("Max Drawdown", f"{core_metrics['max_drawdown_pct'] * 100:.2f}%")
+st.caption(f"Max drawdown (absolute): ${core_metrics['max_drawdown']:,.2f}")
 
 # --- PnL Curve ---
 st.subheader("📈 PnL Curve")
@@ -290,6 +292,25 @@ else:
     show_acc = accuracy_df.copy()
     show_acc["accuracy"] = (show_acc["accuracy"] * 100).round(2)
     st.dataframe(show_acc, use_container_width=True)
+
+# --- Signal Win/Loss Attribution ---
+st.subheader("⚖️ Signal Win/Loss Attribution")
+signal_outcomes_df = compute_signal_outcome_breakdown(closed_trades_df)
+if signal_outcomes_df.empty:
+    st.info("No closed-trade outcomes to attribute by signal state yet.")
+else:
+    signal_outcome_filter = st.selectbox(
+        "Attribution Signal Family",
+        options=["ALL"] + sorted(signal_outcomes_df["signal"].dropna().unique().tolist()),
+        index=0,
+    )
+    show_outcomes = signal_outcomes_df.copy()
+    if signal_outcome_filter != "ALL":
+        show_outcomes = show_outcomes[show_outcomes["signal"] == signal_outcome_filter]
+    show_outcomes["win_rate"] = (pd.to_numeric(show_outcomes["win_rate"], errors="coerce") * 100).round(2)
+    for col in ("total_pnl", "avg_pnl"):
+        show_outcomes[col] = pd.to_numeric(show_outcomes[col], errors="coerce").round(2)
+    st.dataframe(show_outcomes, use_container_width=True)
 
 # --- Per-Strategy PnL ---
 st.subheader("🧠 Per-Strategy PnL")
