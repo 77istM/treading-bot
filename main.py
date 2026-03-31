@@ -5,12 +5,16 @@ import types
 from datetime import date, datetime, timezone
 
 from config import (
+    ALLOW_CRYPTO_SHORTS,
+    CRYPTO_STOP_LOSS_PCT,
+    CRYPTO_TAKE_PROFIT_PCT,
     TICKERS,
     DAILY_MAX_TRADES,
     STOP_LOSS_PCT,
     TAKE_PROFIT_PCT,
     MAX_POSITION_PCT,
     LOOP_INTERVAL_SECONDS,
+    is_crypto_symbol,
     _validate_credentials,
     _check_ollama_health,
     trading_client,
@@ -81,12 +85,18 @@ def _is_eod_window() -> bool:
 
 def _run_trading_cycle(conn, risk_ctrl: PortfolioRiskController) -> None:
     """Execute one full monitor → analyse → trade cycle."""
-    stop_pct = read_setting(conn, "stop_loss_pct", STOP_LOSS_PCT)
-    take_pct = read_setting(conn, "take_profit_pct", TAKE_PROFIT_PCT)
+    stock_stop_pct = read_setting(conn, "stop_loss_pct", STOP_LOSS_PCT)
+    stock_take_pct = read_setting(conn, "take_profit_pct", TAKE_PROFIT_PCT)
 
     # Step 1 — Monitor open positions; collect any stop-loss / take-profit events
     logger.info("[Position Monitor] Checking open positions...")
-    closed_events = monitor_positions(conn, stop_pct, take_pct)
+    closed_events = monitor_positions(
+        conn,
+        stock_stop_pct,
+        stock_take_pct,
+        crypto_stop_pct=CRYPTO_STOP_LOSS_PCT,
+        crypto_take_pct=CRYPTO_TAKE_PROFIT_PCT,
+    )
 
     # Trigger real-time reflection for every stop-loss event
     for event in closed_events:
@@ -143,16 +153,25 @@ def _run_trading_cycle(conn, risk_ctrl: PortfolioRiskController) -> None:
         regime,
     )
 
+    stocks_open = _market_is_open()
+
     # Step 5 — Per-ticker analysis and execution
     for ticker in TICKERS:
         if not _RUNNING:
             break
+        if not stocks_open and not is_crypto_symbol(ticker):
+            continue
+
         daily_count = get_daily_trade_count(conn)
         if daily_count >= DAILY_MAX_TRADES:
             logger.warning("Daily maximum of %d trades reached. Stopping.", DAILY_MAX_TRADES)
             break
 
         logger.info("[%s] Analysing... (trades today: %d)", ticker, daily_count)
+
+        is_crypto = is_crypto_symbol(ticker)
+        stop_pct = CRYPTO_STOP_LOSS_PCT if is_crypto else stock_stop_pct
+        take_pct = CRYPTO_TAKE_PROFIT_PCT if is_crypto else stock_take_pct
 
         sentiment = analyze_sentiment(ticker)
         tech = get_technical_signals(ticker)
@@ -219,6 +238,11 @@ def _run_trading_cycle(conn, risk_ctrl: PortfolioRiskController) -> None:
             daily_count, direction, should_trade, reason
         )
 
+        if is_crypto and final_direction == "SELL" and not ALLOW_CRYPTO_SHORTS:
+            trade_ok = False
+            final_direction = "HOLD"
+            final_reason = "Crypto shorts disabled by ALLOW_CRYPTO_SHORTS=false"
+
         if trade_ok:
             trade_id = execute_trade(
                 conn,
@@ -284,15 +308,20 @@ def main() -> None:
         )
         return
 
-    stop_pct = read_setting(conn, "stop_loss_pct", STOP_LOSS_PCT)
-    take_pct = read_setting(conn, "take_profit_pct", TAKE_PROFIT_PCT)
+    stock_stop_pct = read_setting(conn, "stop_loss_pct", STOP_LOSS_PCT)
+    stock_take_pct = read_setting(conn, "take_profit_pct", TAKE_PROFIT_PCT)
     daily_count = get_daily_trade_count(conn)
 
     logger.info("Hedge Fund Bot started — continuous loop mode.")
     logger.info("Trades today: %d/%d", daily_count, DAILY_MAX_TRADES)
     logger.info(
-        "Risk params: Stop=%.1f%% | Take=%.1f%% | Ring fence=%.1f%% | Cycle=%ds",
-        stop_pct * 100, take_pct * 100, MAX_POSITION_PCT * 100, LOOP_INTERVAL_SECONDS,
+        "Risk params: Stock Stop=%.1f%% | Stock Take=%.1f%% | Crypto Stop=%.1f%% | Crypto Take=%.1f%% | Ring fence=%.1f%% | Cycle=%ds",
+        stock_stop_pct * 100,
+        stock_take_pct * 100,
+        CRYPTO_STOP_LOSS_PCT * 100,
+        CRYPTO_TAKE_PROFIT_PCT * 100,
+        MAX_POSITION_PCT * 100,
+        LOOP_INTERVAL_SECONDS,
     )
     notifier.send(
         level="info",
@@ -324,9 +353,9 @@ def main() -> None:
                 run_end_of_day_reflection(conn)
             last_eod_date = now_utc.date()
 
-        # Only trade during market hours
-        if not _market_is_open():
-            logger.debug("Market closed — sleeping %ds.", LOOP_INTERVAL_SECONDS)
+        # Continue overnight for crypto; sleep only when no crypto symbols are configured.
+        if not _market_is_open() and not any(is_crypto_symbol(t) for t in TICKERS):
+            logger.debug("Market closed and no crypto symbols configured — sleeping %ds.", LOOP_INTERVAL_SECONDS)
             time.sleep(LOOP_INTERVAL_SECONDS)
             continue
 

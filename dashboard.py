@@ -23,6 +23,11 @@ DB_PATH = os.getenv("TRADING_DB_PATH", "trading_bot.db")
 DAILY_MAX_TRADES = int(os.getenv("DAILY_MAX_TRADES", "1000"))
 DEFAULT_STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))
 DEFAULT_TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "0.05"))
+ALLOW_CRYPTO_SHORTS = os.getenv("ALLOW_CRYPTO_SHORTS", "false").strip().lower() in {
+    "1", "true", "yes", "y", "on"
+}
+CRYPTO_TICKERS = os.getenv("CRYPTO_TICKERS", "BTC/USD,ETH/USD")
+BOT_LOG_PATH = os.getenv("BOT_LOG_PATH", "bot.log")
 
 st.set_page_config(page_title="Hedge Fund Trading Bot", layout="wide")
 st.title("🏦 Hedge Fund Trading Bot Dashboard")
@@ -100,7 +105,8 @@ with st.sidebar:
     st.markdown(
         f"**Ring Fence:** < 3 % per trade  \n"
         f"**Daily Max:** {DAILY_MAX_TRADES} trades  \n"
-        f"**Directions:** Long (BUY) & Short (SELL)"
+        f"**Crypto Universe:** {CRYPTO_TICKERS}  \n"
+        f"**Crypto Direction:** {'Long + Short' if ALLOW_CRYPTO_SHORTS else 'Long-only (BUY)'}"
     )
 
 
@@ -170,11 +176,53 @@ def build_pnl_frame(trades: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     return frame, "Cumulative PnL (insufficient trade fields)"
 
 
+def _tail_file(path: str, lines: int = 40) -> list[str]:
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            all_lines = f.readlines()
+        return [ln.rstrip("\n") for ln in all_lines[-lines:]]
+    except OSError:
+        return []
+
+
+def _bot_activity_hint(db_path: str) -> tuple[bool, str]:
+    if not os.path.exists(db_path):
+        return False, f"Database file '{db_path}' does not exist yet."
+    try:
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute("SELECT COUNT(*) FROM risk_snapshots").fetchone()
+            snapshots = int(row[0]) if row else 0
+        if snapshots > 0:
+            return True, f"Bot appears active: {snapshots} risk snapshots recorded."
+        return False, "Database exists, but no risk snapshots yet."
+    except sqlite3.Error as exc:
+        return False, f"Could not inspect DB activity: {exc}"
+
+
 # --- Load Data ---
 trades_df = load_trades(DB_PATH)
 
 if trades_df.empty:
-    st.warning(f"No trades found at '{DB_PATH}'. Run the bot first to populate the database.")
+    st.warning(f"No trades found at '{DB_PATH}'.")
+    active, detail = _bot_activity_hint(DB_PATH)
+    if active:
+        st.info(
+            "Bot is running, but no orders have been executed yet. "
+            "With long-only crypto, SELL signals are intentionally skipped."
+        )
+    st.caption(detail)
+
+    tail = _tail_file(BOT_LOG_PATH, lines=100)
+    if tail:
+        interesting = [
+            ln for ln in tail
+            if ("Strategy Decision" in ln or "Skipping" in ln or "Cycle complete" in ln)
+        ]
+        if interesting:
+            st.subheader("Recent Bot Decisions")
+            st.code("\n".join(interesting[-25:]), language="text")
     st.stop()
 
 if "trade_rowid" in trades_df.columns:

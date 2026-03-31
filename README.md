@@ -2,6 +2,51 @@
 
 ## 📊 Implementation Status
 
+## Ollama + Qwen Runtime (Codespaces)
+
+The bot is configured to use Ollama with Qwen by default:
+
+- `OLLAMA_MODEL=qwen2.5:7b-instruct`
+- `OLLAMA_BASE_URL=http://ollama:11434`
+- `SKIP_OLLAMA_HEALTHCHECK=false`
+
+`docker-compose.yml` includes an `ollama` service and wires `bot`/`dashboard`
+to wait for it.
+
+First-time model pull:
+
+```bash
+docker compose up -d ollama
+docker exec -it ollama ollama pull qwen2.5:7b-instruct
+```
+
+Run the app stack:
+
+```bash
+docker compose up --build bot dashboard
+```
+
+Optional fast fallback model for lower CPU/RAM environments:
+
+```bash
+docker exec -it ollama ollama pull qwen2.5:3b-instruct
+# then set OLLAMA_MODEL=qwen2.5:3b-instruct in .env
+```
+
+## Crypto Trading Support
+
+The bot can now trade crypto symbols on Alpaca paper trading so you can test outside stock market hours.
+
+- Configure crypto symbols with `CRYPTO_TICKERS` (examples: `BTC/USD,ETH/USD` or `BTCUSD,ETHUSD`).
+- Crypto risk defaults are stricter than equities:
+	- `CRYPTO_MAX_POSITION_PCT=0.01`
+	- `CRYPTO_STOP_LOSS_PCT=0.02`
+	- `CRYPTO_TAKE_PROFIT_PCT=0.03`
+	- `ALLOW_CRYPTO_SHORTS=false` (default long-only for safety)
+- When equities are closed, the loop still runs for crypto symbols.
+
+You can keep your stock universe in `TICKERS`; the bot handles both universes together.
+
 | Phase | Name | Status | Notes |
 |-------|------|--------|-------|
 | **Phase 1** | Continuous Loop | ✅ **Done** | Infinite scheduler loop, market-hours gate, graceful shutdown |

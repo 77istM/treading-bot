@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from config import NEWS_API_KEY
+from config import is_crypto_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,9 @@ def get_earnings_flag(ticker: str) -> str:
     "SAFE"    — no imminent earnings signal found
     "UNKNOWN" — NEWS_API_KEY missing or fetch failed
     """
+    if is_crypto_symbol(ticker):
+        return "SAFE"
+
     if not NEWS_API_KEY:
         return "UNKNOWN"
 
