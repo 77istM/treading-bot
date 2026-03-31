@@ -1,132 +1,229 @@
 
 
-## 📊 Implementation Status
+## Trading Bot Quick Start
 
-## Ollama + Qwen Runtime (Codespaces)
+This repository contains an automated paper-trading bot with:
 
-The bot is configured to use Ollama with Qwen by default:
+- Alpaca execution
+- Multi-signal analysis (technical, sentiment, macro, earnings)
+- Portfolio risk gates
+- Post-trade reflection logging
+- Streamlit dashboard
+- Docker stack with Ollama integration
 
-- `OLLAMA_MODEL=qwen2.5:7b-instruct`
-- `OLLAMA_BASE_URL=http://ollama:11434`
-- `SKIP_OLLAMA_HEALTHCHECK=false`
+Use the sections below as copy-and-paste runbooks.
 
-`docker-compose.yml` includes an `ollama` service and wires `bot`/`dashboard`
-to wait for it.
+## 1) Prerequisites
 
-First-time model pull:
+Install:
+
+- Python 3.11+
+- Docker + Docker Compose (recommended path)
+- Alpaca paper trading API credentials
+
+Optional but recommended:
+
+- News API key for sentiment/news quality
+
+## 2) Fastest Start (Docker, Recommended)
+
+Run everything (Ollama + bot + dashboard) with the commands below.
 
 ```bash
+cd /workspaces/trading-bot
+
+# Create local env file
+cp .env.example .env 2>/dev/null || true
+
+# If .env.example does not exist, create .env manually:
+cat > .env << 'EOF'
+ALPACA_API_KEY=your_alpaca_key
+ALPACA_SECRET=your_alpaca_secret
+
+# Optional but recommended
+NEWS_API_KEY=
+
+# Ollama
+OLLAMA_BASE_URL=http://ollama:11434
+OLLAMA_MODEL=llama3.2:3b
+SKIP_OLLAMA_HEALTHCHECK=false
+
+# Runtime
+LOOP_INTERVAL_SECONDS=300
+DAILY_MAX_TRADES=1000
+
+# Universes
+TICKERS=SPY,QQQ,AAPL,MSFT,NVDA
+CRYPTO_TICKERS=BTC/USD,ETH/USD
+
+# Risk
+MAX_POSITION_PCT=0.03
+STOP_LOSS_PCT=0.03
+TAKE_PROFIT_PCT=0.05
+CRYPTO_MAX_POSITION_PCT=0.01
+CRYPTO_STOP_LOSS_PCT=0.02
+CRYPTO_TAKE_PROFIT_PCT=0.03
+ALLOW_STOCK_SHORTS=true
+ALLOW_CRYPTO_SHORTS=false
+
+# Optional alerts
+ALERTS_ENABLED=false
+ALERT_WEBHOOK_URL=
+ALERT_TIMEOUT_SECONDS=5
+EOF
+
+# Start Ollama first
 docker compose up -d ollama
-docker exec -it ollama ollama pull qwen2.5:7b-instruct
-```
 
-Run the app stack:
+# Pull a model once (choose one)
+docker exec -it ollama ollama pull llama3.2:3b
+# docker exec -it ollama ollama pull qwen2.5:7b-instruct
 
-```bash
+# Start bot + dashboard
 docker compose up --build bot dashboard
 ```
 
-Optional fast fallback model for lower CPU/RAM environments:
+Open dashboard at:
+
+- http://localhost:8501
+
+Stop stack:
 
 ```bash
-docker exec -it ollama ollama pull qwen2.5:3b-instruct
-# then set OLLAMA_MODEL=qwen2.5:3b-instruct in .env
+docker compose down
 ```
 
-## Crypto Trading Support
+## 3) Local Start (Without Docker)
 
-The bot can now trade crypto symbols on Alpaca paper trading so you can test outside stock market hours.
-
-- Configure crypto symbols with `CRYPTO_TICKERS` (examples: `BTC/USD,ETH/USD` or `BTCUSD,ETHUSD`).
-- Crypto risk defaults are stricter than equities:
-	- `CRYPTO_MAX_POSITION_PCT=0.01`
-	- `CRYPTO_STOP_LOSS_PCT=0.02`
-	- `CRYPTO_TAKE_PROFIT_PCT=0.03`
-	- `ALLOW_STOCK_SHORTS=true` (stocks can be long+short by default)
-	- `ALLOW_CRYPTO_SHORTS=false` (default long-only for safety)
-- Both `ALLOW_STOCK_SHORTS` and `ALLOW_CRYPTO_SHORTS` can be toggled live from the dashboard
-  Risk Configuration panel and are persisted in the database settings table.
-- When equities are closed, the loop still runs for crypto symbols.
-
-You can keep your stock universe in `TICKERS`; the bot handles both universes together.
-
-| Phase | Name | Status | Notes |
-|-------|------|--------|-------|
-| **Phase 1** | Continuous Loop | ✅ **Done** | Infinite scheduler loop, market-hours gate, graceful shutdown |
-| **Phase 2** | Richer Signals | ✅ **Done** | MACD, Bollinger Bands, volume spike, earnings flag, momentum score |
-| **Phase 3** | Portfolio Risk Controller | ✅ **Done** | Daily drawdown halt, portfolio heat limit, risk snapshots |
-| **Phase 4** | Post-Trade Reflection | ✅ **Done** | Stop-loss real-time reflection, EOD review, lesson injection |
-| **Phase 5** | Multi-Strategy | ✅ **Done** | Regime-based strategy selector with momentum, mean-reversion, and pairs trading |
-| **Phase 6** | Performance Attribution | ✅ **Done** | Signal accuracy tracking, Sharpe, drawdown, alpha vs benchmark |
-| **Phase 7** | Dashboard | ✅ **Done** | Reflections viewer, risk status, and attribution charts |
-| **Phase 8** | Hardening | ✅ **Done** | Unit tests, GitHub Actions CI, secrets vault loading, webhook alerts |
-
-
-## Phase 8 Hardening
-
-### 1) Tests
-
-- Added hardening test coverage in `tests/test_hardening.py`.
-- Run all tests locally:
+Use this path if you want to run directly on your host.
 
 ```bash
+cd /workspaces/trading-bot
+
+python3 -m venv .venv
+source .venv/bin/activate
+
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# Create .env in project root and fill credentials (same template as above)
+cat > .env << 'EOF'
+ALPACA_API_KEY=your_alpaca_key
+ALPACA_SECRET=your_alpaca_secret
+NEWS_API_KEY=
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3.2:3b
+SKIP_OLLAMA_HEALTHCHECK=false
+EOF
+
+# Ensure Ollama is running locally and model exists
+ollama serve
+# In another terminal:
+ollama pull llama3.2:3b
+
+# Run bot
+python main.py
+```
+
+In a second terminal, run dashboard:
+
+```bash
+cd /workspaces/trading-bot
+source .venv/bin/activate
+streamlit run dashboard.py --server.port 8501 --server.address 0.0.0.0
+```
+
+## 4) Tests
+
+Run the full unit suite:
+
+```bash
+cd /workspaces/trading-bot
 python -m unittest discover -s tests -v
 ```
 
-### 2) CI/CD
+## 5) Day-2 Operations
 
-- GitHub Actions workflow: `.github/workflows/ci.yml`
-- CI dependency lock for test/runtime imports: `requirements-ci.txt`
+Useful commands:
 
-The CI workflow runs on pushes and PRs to `master` and executes the full unit test suite.
+```bash
+# Follow container logs
+docker compose logs -f bot
+docker compose logs -f dashboard
+docker compose logs -f ollama
 
-### 3) Secrets Vault
+# Check running containers
+docker compose ps
 
-Secrets are now resolved in this precedence order:
+# Rebuild after dependency/code changes
+docker compose up --build bot dashboard
 
-1. Environment variables
-2. JSON vault file (`SECRETS_VAULT_FILE`)
-3. Docker-style secret files (`SECRETS_DIR`, default `/run/secrets`)
-
-Required runtime secrets:
-
-- `ALPACA_API_KEY`
-- `ALPACA_SECRET`
-
-Optional:
-
-- `NEWS_API_KEY`
-- `OLLAMA_MODEL`
-- `OLLAMA_BASE_URL`
-- `SKIP_OLLAMA_HEALTHCHECK`
-
-Example JSON vault file:
-
-```json
-{
-	"ALPACA_API_KEY": "your-key",
-	"ALPACA_SECRET": "your-secret",
-	"NEWS_API_KEY": "optional-news-key"
-}
+# Reset local DB (destructive)
+rm -f trading_bot.db
 ```
 
-### 4) Alert Notifications
+## 6) Environment Variables Reference
 
-Webhook alerts are now supported for startup failures and runtime risk/error events.
+Required:
 
-Enable alerts with:
+- ALPACA_API_KEY
+- ALPACA_SECRET
 
-- `ALERTS_ENABLED=true`
-- `ALERT_WEBHOOK_URL=https://your-endpoint`
-- `ALERT_TIMEOUT_SECONDS=5` (optional)
+Common optional:
 
-Alert categories emitted by the bot:
+- NEWS_API_KEY
+- OLLAMA_MODEL
+- OLLAMA_BASE_URL
+- SKIP_OLLAMA_HEALTHCHECK
+- TICKERS
+- CRYPTO_TICKERS
+- LOOP_INTERVAL_SECONDS
+- DAILY_MAX_TRADES
 
-- Startup validation failure
-- Database initialization failure
-- Stop-loss triggered
-- Risk-gate trading halt
-- Unhandled trading-cycle error
-- Bot start/stop lifecycle events
+Risk controls:
+
+- MAX_POSITION_PCT
+- STOP_LOSS_PCT
+- TAKE_PROFIT_PCT
+- CRYPTO_MAX_POSITION_PCT
+- CRYPTO_STOP_LOSS_PCT
+- CRYPTO_TAKE_PROFIT_PCT
+- ALLOW_STOCK_SHORTS
+- ALLOW_CRYPTO_SHORTS
+
+Secrets loading precedence:
+
+1. Environment variables
+2. JSON vault file via SECRETS_VAULT_FILE
+3. Docker secret files in SECRETS_DIR (default /run/secrets)
+
+## 7) Troubleshooting
+
+Ollama health check fails:
+
+```bash
+docker compose logs ollama
+docker exec -it ollama ollama list
+```
+
+Missing Alpaca credentials error:
+
+- Ensure ALPACA_API_KEY and ALPACA_SECRET are set in .env
+- Restart containers after updating .env
+
+TA-Lib install issues on local host:
+
+- Prefer Docker path (TA-Lib is already handled in Docker image)
+
+Dashboard has no data:
+
+- Let bot complete at least one cycle
+- Confirm database file exists and bot logs show trade/analysis activity
+
+## 8) Safety Notes
+
+- This project is configured for paper trading and should be validated extensively before any live deployment.
+- Start with long-only settings and conservative position sizing.
+- Keep ALLOW_CRYPTO_SHORTS=false unless you intentionally want short exposure.
 
 
