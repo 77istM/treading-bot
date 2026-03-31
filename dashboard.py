@@ -6,7 +6,11 @@ from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 
-from db.queries import read_setting as _db_read_setting, write_setting as _db_write_setting
+from db.queries import (
+    read_bool_setting as _db_read_bool_setting,
+    read_setting as _db_read_setting,
+    write_setting as _db_write_setting,
+)
 from pnl.attribution import (
     benchmark_cumulative_returns,
     build_closed_trades_frame,
@@ -23,7 +27,10 @@ DB_PATH = os.getenv("TRADING_DB_PATH", "trading_bot.db")
 DAILY_MAX_TRADES = int(os.getenv("DAILY_MAX_TRADES", "1000"))
 DEFAULT_STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))
 DEFAULT_TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "0.05"))
-ALLOW_CRYPTO_SHORTS = os.getenv("ALLOW_CRYPTO_SHORTS", "false").strip().lower() in {
+DEFAULT_ALLOW_STOCK_SHORTS = os.getenv("ALLOW_STOCK_SHORTS", "true").strip().lower() in {
+    "1", "true", "yes", "y", "on"
+}
+DEFAULT_ALLOW_CRYPTO_SHORTS = os.getenv("ALLOW_CRYPTO_SHORTS", "false").strip().lower() in {
     "1", "true", "yes", "y", "on"
 }
 CRYPTO_TICKERS = os.getenv("CRYPTO_TICKERS", "BTC/USD,ETH/USD")
@@ -68,6 +75,16 @@ def read_setting(key: str, default: float) -> float:
         conn.close()
 
 
+def read_bool_setting(key: str, default: bool) -> bool:
+    conn = _get_conn()
+    if conn is None:
+        return default
+    try:
+        return _db_read_bool_setting(conn, key, default)
+    finally:
+        conn.close()
+
+
 # --- Sidebar: Risk Configuration ---
 with st.sidebar:
     st.header("⚙️ Risk Configuration")
@@ -75,6 +92,8 @@ with st.sidebar:
 
     current_stop = read_setting("stop_loss_pct", DEFAULT_STOP_LOSS_PCT)
     current_take = read_setting("take_profit_pct", DEFAULT_TAKE_PROFIT_PCT)
+    current_stock_shorts = read_bool_setting("allow_stock_shorts", DEFAULT_ALLOW_STOCK_SHORTS)
+    current_crypto_shorts = read_bool_setting("allow_crypto_shorts", DEFAULT_ALLOW_CRYPTO_SHORTS)
 
     stop_pct = st.slider(
         "Stop Loss %",
@@ -96,17 +115,39 @@ with st.sidebar:
         help="Close position when profit reaches this % (default 5 %).",
     ) / 100.0
 
+    allow_stock_shorts = st.checkbox(
+        "Allow Stock Shorts",
+        value=current_stock_shorts,
+        help="Enable SELL orders for non-crypto symbols.",
+    )
+
+    allow_crypto_shorts = st.checkbox(
+        "Allow Crypto Shorts",
+        value=current_crypto_shorts,
+        help="Enable SELL orders for crypto symbols.",
+    )
+
     if st.button("💾 Save Risk Settings"):
         write_setting("stop_loss_pct", stop_pct)
         write_setting("take_profit_pct", take_pct)
-        st.success(f"Saved: Stop = {stop_pct * 100:.1f}%  |  Take = {take_pct * 100:.1f}%")
+        write_setting("allow_stock_shorts", allow_stock_shorts)
+        write_setting("allow_crypto_shorts", allow_crypto_shorts)
+        st.success(
+            "Saved risk controls and direction toggles. "
+            f"Stop = {stop_pct * 100:.1f}% | Take = {take_pct * 100:.1f}%"
+        )
+
+    # Keep caption in sync even before pressing save.
+    stock_direction = "Long + Short" if allow_stock_shorts else "Long-only (BUY)"
+    crypto_direction = "Long + Short" if allow_crypto_shorts else "Long-only (BUY)"
 
     st.divider()
     st.markdown(
         f"**Ring Fence:** < 3 % per trade  \n"
         f"**Daily Max:** {DAILY_MAX_TRADES} trades  \n"
         f"**Crypto Universe:** {CRYPTO_TICKERS}  \n"
-        f"**Crypto Direction:** {'Long + Short' if ALLOW_CRYPTO_SHORTS else 'Long-only (BUY)'}"
+        f"**Stock Direction:** {stock_direction}  \n"
+        f"**Crypto Direction:** {crypto_direction}"
     )
 
 
@@ -208,9 +249,13 @@ if trades_df.empty:
     st.warning(f"No trades found at '{DB_PATH}'.")
     active, detail = _bot_activity_hint(DB_PATH)
     if active:
+        stock_shorts_enabled = read_bool_setting("allow_stock_shorts", DEFAULT_ALLOW_STOCK_SHORTS)
+        crypto_shorts_enabled = read_bool_setting("allow_crypto_shorts", DEFAULT_ALLOW_CRYPTO_SHORTS)
+        stock_mode = "Long + Short" if stock_shorts_enabled else "Long-only"
+        crypto_mode = "Long + Short" if crypto_shorts_enabled else "Long-only"
         st.info(
             "Bot is running, but no orders have been executed yet. "
-            "With long-only crypto, SELL signals are intentionally skipped."
+            f"Current direction filters: Stocks {stock_mode}, Crypto {crypto_mode}."
         )
     st.caption(detail)
 

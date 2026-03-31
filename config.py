@@ -93,6 +93,7 @@ TAKE_PROFIT_PCT = _env_float("TAKE_PROFIT_PCT", 0.05)   # Default 5% take profit
 CRYPTO_MAX_POSITION_PCT = _env_float("CRYPTO_MAX_POSITION_PCT", 0.01)
 CRYPTO_STOP_LOSS_PCT = _env_float("CRYPTO_STOP_LOSS_PCT", 0.02)
 CRYPTO_TAKE_PROFIT_PCT = _env_float("CRYPTO_TAKE_PROFIT_PCT", 0.03)
+ALLOW_STOCK_SHORTS = _env_bool("ALLOW_STOCK_SHORTS", default=True)
 ALLOW_CRYPTO_SHORTS = _env_bool("ALLOW_CRYPTO_SHORTS", default=False)
 
 # --- Continuous Loop ---

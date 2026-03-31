@@ -42,7 +42,10 @@ The bot can now trade crypto symbols on Alpaca paper trading so you can test out
 	- `CRYPTO_MAX_POSITION_PCT=0.01`
 	- `CRYPTO_STOP_LOSS_PCT=0.02`
 	- `CRYPTO_TAKE_PROFIT_PCT=0.03`
+	- `ALLOW_STOCK_SHORTS=true` (stocks can be long+short by default)
 	- `ALLOW_CRYPTO_SHORTS=false` (default long-only for safety)
+- Both `ALLOW_STOCK_SHORTS` and `ALLOW_CRYPTO_SHORTS` can be toggled live from the dashboard
+  Risk Configuration panel and are persisted in the database settings table.
 - When equities are closed, the loop still runs for crypto symbols.
 
 You can keep your stock universe in `TICKERS`; the bot handles both universes together.

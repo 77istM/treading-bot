@@ -20,8 +20,30 @@ def read_setting(conn: sqlite3.Connection, key: str, default: float) -> float:
     return default
 
 
-def write_setting(conn: sqlite3.Connection, key: str, value: float) -> None:
-    """Persist a numeric setting to the settings table."""
+def read_bool_setting(conn: sqlite3.Connection, key: str, default: bool) -> bool:
+    """Read a boolean setting from the settings table, falling back to default."""
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        if row and row[0] is not None:
+            raw = str(row[0]).strip().lower()
+            if raw in {"1", "true", "yes", "y", "on"}:
+                return True
+            if raw in {"0", "false", "no", "n", "off"}:
+                return False
+    except Exception as exc:
+        logger.warning(
+            "Could not read boolean setting '%s' from DB: %s. Using default %s.",
+            key,
+            exc,
+            default,
+        )
+    return default
+
+
+def write_setting(conn: sqlite3.Connection, key: str, value: float | bool) -> None:
+    """Persist a setting value to the settings table."""
     try:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS settings "
