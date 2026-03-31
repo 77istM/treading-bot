@@ -2,6 +2,8 @@ alpaca-py
 langchain
 langchain-community
 langchain-core
+langchain-ollama
 numpy
 pandas
+python-dotenv
 requests

@@ -3,7 +3,11 @@ import logging
 from datetime import datetime, timedelta
 
 import numpy as np
-import talib
+
+try:
+    import talib
+except ModuleNotFoundError:  # pragma: no cover – native TA-Lib not required for unit tests
+    talib = None  # type: ignore[assignment]
 
 from config import (
     CryptoBarsRequest,
@@ -87,6 +91,8 @@ def _fetch_bars(ticker: str) -> dict | None:
 def _rsi_signal(close: np.ndarray) -> str:
     """RSI(14): < 30 → BULLISH (oversold), > 70 → BEARISH (overbought)."""
     try:
+        if talib is None:
+            return "NEUTRAL"
         rsi = talib.RSI(close, timeperiod=14)
         val = float(rsi[-1])
         if np.isnan(val):
@@ -107,6 +113,8 @@ def _macd_signal(close: np.ndarray) -> str:
     but the overall histogram direction also counts.
     """
     try:
+        if talib is None:
+            return "NEUTRAL"
         macd, signal, _ = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
         m, s = float(macd[-1]), float(signal[-1])
         m_prev, s_prev = float(macd[-2]), float(signal[-2])
@@ -130,6 +138,8 @@ def _macd_signal(close: np.ndarray) -> str:
 def _bbands_signal(close: np.ndarray) -> str:
     """Bollinger Bands(20, 2σ): price below lower → BULLISH, above upper → BEARISH."""
     try:
+        if talib is None:
+            return "NEUTRAL"
         upper, _middle, lower = talib.BBANDS(close, timeperiod=20, nbdevup=2, nbdevdn=2)
         price = close[-1]
         u, lo = float(upper[-1]), float(lower[-1])
