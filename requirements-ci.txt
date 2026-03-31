@@ -3,6 +3,7 @@ langchain
 langchain-community
 langchain-core
 langchain-ollama
+mcp>=1.23.0
 numpy
 pandas
 python-dotenv
