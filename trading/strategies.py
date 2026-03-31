@@ -304,19 +304,43 @@ class StrategySelector:
         self.mean_reversion = MeanReversionStrategy()
         self.pairs = PairsTradingStrategy()
 
-    def choose(self, ctx: StrategyContext, regime: str) -> StrategyDecision:
+    def choose(
+        self,
+        ctx: StrategyContext,
+        regime: str,
+        allowed_directions: set[str] | None = None,
+    ) -> StrategyDecision:
+        allowed = {d.upper() for d in (allowed_directions or {"BUY", "SELL"})}
+
         if regime == "TRENDING":
             order = [self.momentum, self.pairs, self.mean_reversion]
         else:
             order = [self.pairs, self.mean_reversion, self.momentum]
 
         fallback = None
+        blocked_trade: StrategyDecision | None = None
         for strat in order:
             decision = strat.evaluate(ctx, regime)
             if fallback is None:
                 fallback = decision
-            if decision.should_trade:
+            if decision.should_trade and decision.direction in allowed:
                 return decision
+            if decision.should_trade and blocked_trade is None:
+                blocked_trade = decision
+
+        if blocked_trade is not None:
+            allowed_txt = ",".join(sorted(allowed))
+            return StrategyDecision(
+                strategy_name=blocked_trade.strategy_name,
+                regime=blocked_trade.regime,
+                direction="HOLD",
+                should_trade=False,
+                reason=(
+                    f"Trade blocked by direction filter: {blocked_trade.direction} not in "
+                    f"[{allowed_txt}]. Original: {blocked_trade.reason}"
+                ),
+                confidence="LOW",
+            )
 
         if fallback is not None:
             return fallback

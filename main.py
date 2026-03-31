@@ -5,6 +5,7 @@ import types
 from datetime import date, datetime, timezone
 
 from config import (
+    ALLOW_STOCK_SHORTS,
     ALLOW_CRYPTO_SHORTS,
     CRYPTO_STOP_LOSS_PCT,
     CRYPTO_TAKE_PROFIT_PCT,
@@ -20,7 +21,7 @@ from config import (
     trading_client,
 )
 from db.schema import init_db
-from db.queries import read_setting, get_daily_trade_count
+from db.queries import read_bool_setting, read_setting, get_daily_trade_count
 from signals.sentiment import analyze_sentiment
 from signals.technical import get_technical_signals
 from signals.earnings import get_earnings_flag
@@ -87,6 +88,8 @@ def _run_trading_cycle(conn, risk_ctrl: PortfolioRiskController) -> None:
     """Execute one full monitor → analyse → trade cycle."""
     stock_stop_pct = read_setting(conn, "stop_loss_pct", STOP_LOSS_PCT)
     stock_take_pct = read_setting(conn, "take_profit_pct", TAKE_PROFIT_PCT)
+    stock_shorts_enabled = read_bool_setting(conn, "allow_stock_shorts", ALLOW_STOCK_SHORTS)
+    crypto_shorts_enabled = read_bool_setting(conn, "allow_crypto_shorts", ALLOW_CRYPTO_SHORTS)
 
     # Step 1 — Monitor open positions; collect any stop-loss / take-profit events
     logger.info("[Position Monitor] Checking open positions...")
@@ -209,7 +212,17 @@ def _run_trading_cycle(conn, risk_ctrl: PortfolioRiskController) -> None:
             fed_rate=fed_rate,
             fear_level=fear_level,
         )
-        strategy_decision = selector.choose(strategy_context, regime)
+        allowed_directions = {"BUY", "SELL"}
+        if is_crypto and not crypto_shorts_enabled:
+            allowed_directions = {"BUY"}
+        if not is_crypto and not stock_shorts_enabled:
+            allowed_directions = {"BUY"}
+
+        strategy_decision = selector.choose(
+            strategy_context,
+            regime,
+            allowed_directions=allowed_directions,
+        )
         strategy_name = strategy_decision.strategy_name
         strategy_regime = strategy_decision.regime
         direction = strategy_decision.direction
@@ -238,10 +251,14 @@ def _run_trading_cycle(conn, risk_ctrl: PortfolioRiskController) -> None:
             daily_count, direction, should_trade, reason
         )
 
-        if is_crypto and final_direction == "SELL" and not ALLOW_CRYPTO_SHORTS:
+        if is_crypto and final_direction == "SELL" and not crypto_shorts_enabled:
             trade_ok = False
             final_direction = "HOLD"
-            final_reason = "Crypto shorts disabled by ALLOW_CRYPTO_SHORTS=false"
+            final_reason = "Crypto shorts disabled by allow_crypto_shorts=false"
+        elif not is_crypto and final_direction == "SELL" and not stock_shorts_enabled:
+            trade_ok = False
+            final_direction = "HOLD"
+            final_reason = "Stock shorts disabled by allow_stock_shorts=false"
 
         if trade_ok:
             trade_id = execute_trade(
@@ -253,6 +270,7 @@ def _run_trading_cycle(conn, risk_ctrl: PortfolioRiskController) -> None:
                 signals,
                 stop_pct,
                 take_pct,
+                allow_short=crypto_shorts_enabled if is_crypto else stock_shorts_enabled,
                 strategy_name=strategy_name,
                 strategy_regime=strategy_regime,
             )

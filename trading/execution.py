@@ -5,7 +5,6 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
 
 from config import (
-    ALLOW_CRYPTO_SHORTS,
     CRYPTO_MAX_POSITION_PCT,
     MAX_ANALYSIS_LENGTH,
     MAX_POSITION_PCT,
@@ -28,6 +27,7 @@ def execute_trade(
     signals: dict,
     stop_pct: float,
     take_pct: float,
+    allow_short: bool = True,
     strategy_name: str = "unknown",
     strategy_regime: str = "UNKNOWN",
 ) -> int | None:
@@ -42,8 +42,9 @@ def execute_trade(
     """
     symbol = ticker.strip().upper().replace("-", "/")
     crypto = is_crypto_symbol(symbol)
-    if crypto and direction == "SELL" and not ALLOW_CRYPTO_SHORTS:
-        logger.info("Skipping crypto short for %s because ALLOW_CRYPTO_SHORTS=false.", symbol)
+    if direction == "SELL" and not allow_short:
+        asset_type = "crypto" if crypto else "stock"
+        logger.info("Skipping %s short for %s because shorting is disabled.", asset_type, symbol)
         return None
 
     side = OrderSide.BUY if direction == "BUY" else OrderSide.SELL

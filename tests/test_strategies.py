@@ -92,6 +92,29 @@ class TestPhase5Strategies(unittest.TestCase):
         self.assertEqual(decision.direction, "SELL")
 
     @patch("trading.strategies._fetch_closes")
+    def test_strategy_selector_buy_only_blocks_short_and_returns_hold(self, mock_fetch_closes):
+        # Ensure no pair signal so momentum short becomes the first trade candidate.
+        n = 120
+        flat = np.linspace(100.0, 101.0, n)
+        mock_fetch_closes.return_value = {"SPY": flat, "QQQ": flat}
+
+        selector = StrategySelector()
+        decision = selector.choose(
+            self._ctx(
+                ticker="SPY",
+                macd="BEARISH",
+                volume="NORMAL",
+                momentum_score=-1.0,  # -> momentum sell trigger at -1.5 after MACD adjustment
+            ),
+            regime="RANGING",
+            allowed_directions={"BUY"},
+        )
+
+        self.assertFalse(decision.should_trade)
+        self.assertEqual(decision.direction, "HOLD")
+        self.assertIn("Trade blocked by direction filter", decision.reason)
+
+    @patch("trading.strategies._fetch_closes")
     def test_detect_market_regime_trending(self, mock_fetch_closes):
         prices = np.linspace(100.0, 160.0, 120)
         mock_fetch_closes.return_value = {"SPY": prices}
